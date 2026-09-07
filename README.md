@@ -2,20 +2,18 @@
 
 [![CI](https://github.com/rapture-fx/Marshall/actions/workflows/ci.yml/badge.svg)](https://github.com/rapture-fx/Marshall/actions/workflows/ci.yml)
 [![Version](https://img.shields.io/badge/version-0.2.0-blue.svg)](Cargo.toml)
-[![MSRV](https://img.shields.io/badge/MSRV-1.85-blue.svg)](Cargo.toml)
+[![MSRV](https://img.shields.io/badge/MSRV-1.88-blue.svg)](Cargo.toml)
 [![License: MIT](https://img.shields.io/badge/License-MIT-green.svg)](LICENSE)
 [![Rust](https://img.shields.io/badge/rust-edition_2021-orange.svg)](Cargo.toml)
 
-Policy-checked tool execution for agents, as a Rust library and an HTTP service (`marshalld`).
+A Rust library and HTTP service (`marshalld`) for running agent tools behind explicit policies.
 
-Every tool denies by default. Filesystem paths must resolve under a configured root, HTTP hosts must be allowlisted and resolve to public addresses, shell programs must be listed with an explicit argument policy, and code runs only in allowlisted languages. An unconfigured tool refuses all calls.
+Every tool denies by default. Filesystem paths must resolve inside a configured root, HTTP hosts must be allowlisted and resolve to public addresses, shell binaries must be listed with an argument policy, and code runs only in allowlisted languages. A tool with no configuration refuses every call.
 
 ## Contents
 
-- [Features](#features)
-- [Requirements](#requirements)
-- [Installation](#installation)
-- [Library usage](#library-usage)
+- [When to use this](#when-to-use-this)
+- [Quick start](#quick-start)
 - [Configuration](#configuration)
 - [Tools](#tools)
 - [Security notes](#security-notes)
@@ -24,6 +22,31 @@ Every tool denies by default. Filesystem paths must resolve under a configured r
 - [Development](#development)
 - [Limitations](#limitations)
 - [License](#license)
+
+## When to use this
+
+Use Marshall when an agent needs to read files, run commands, fetch URLs, or execute code snippets, and you want those actions checked against a policy first. Register only the tools the agent needs, scope them to a workspace directory, and run `marshalld` when callers live in another process or language.
+
+What you get:
+
+- Filesystem, shell, HTTP, code, and system tools behind allowlists
+- Session-scoped helpers for working memory: think, memory, todo, plan, reflect
+- HTTP client that checks the allowlist before DNS, disables redirects, pins the connection to the validated address, and caps body size
+- Shell execution without an intermediate shell: absolute program paths, argument policies, piped stdin, output caps, timeout with child cleanup
+- Capped output everywhere: file reads, HTTP bodies, and process output report truncation instead of growing without bound
+- Summaries safe to log: `ToolOutcome.summary` carries hashes and byte counts, payload bytes stay in `content`
+- Batch and sequence execution with ordering, concurrency bounds, and `{{steps[N].stdout}}` templating
+- `marshalld`: sessions, per-request policy checks, Prometheus metrics, JSONL audit log, YAML hot-reload
+
+## Quick start
+
+Add the library:
+
+```sh
+cargo add marshall
+```
+
+Register tools explicitly. Anything not registered, or not covered by the policy, returns an error:
 
 ```rust
 use std::sync::Arc;
@@ -36,44 +59,7 @@ tools.register(Arc::new(FileSystemTool::new(sandbox)));
 tools.register(Arc::new(HttpTool::new(["api.github.com"])));
 ```
 
-`marshalld` exposes the same tools over HTTP. See [Configuration](#configuration) and [HTTP API](#http-api).
-
-## Features
-
-- Filesystem, shell, HTTP, code, and system tools behind explicit allowlists
-- Session-scoped helpers for working memory: think, memory, todo, plan, reflect
-- SSRF-resistant HTTP client: allowlist checked before DNS, no redirects, connections pinned to validated addresses, port allowlist
-- Shell execution without an intermediate shell: absolute program paths, argument policies, piped stdin, output caps, timeout with child cleanup
-- Bounded output everywhere: file reads, HTTP bodies, and process output are capped and report truncation
-- Redacted summaries by default: `ToolOutcome.summary` carries hashes and byte counts; payload bytes stay in `content` and are omitted from serialized logs
-- Batch and sequence execution with ordering, concurrency bounds, and `{{steps[N].stdout}}` templating
-- `marshalld`: sessions, per-request policy enforcement, Prometheus metrics, JSONL audit log, YAML hot-reload
-
-## Requirements
-
-- Rust 1.85 or later
-- Linux or macOS for development; Linux for `openat2`-backed path checks and container isolation
-- Optional: `python3` / `node` on `PATH` if you enable those code languages
-- Optional: `/dev/kvm` on Linux for the `container` backend
-
-## Installation
-
-```sh
-cargo add marshall
-```
-
-Or clone and build:
-
-```sh
-git clone https://github.com/rapture-fx/Marshall.git
-cd Marshall
-cargo build
-cargo run --bin marshalld -- --config marshall.yaml --port 3000
-```
-
-## Library usage
-
-Register only what the agent needs. Anything not registered or not allowlisted returns a policy error.
+A fuller example with shell and code tools:
 
 ```rust
 use std::sync::Arc;
@@ -102,15 +88,26 @@ tools.register(Arc::new(
 ));
 ```
 
-Run the example:
+Run the runnable example:
 
 ```sh
 cargo run --example agent_tools
 ```
 
+It wires a temp workspace, shows one allowed read and one allowed shell call, then shows four refused calls (path escape, flag injection, metadata endpoint, unlisted host).
+
+To run the service instead:
+
+```sh
+git clone https://github.com/rapture-fx/Marshall.git
+cd Marshall
+cargo build
+cargo run --bin marshalld -- --config marshall.yaml --port 3000
+```
+
 ## Configuration
 
-`marshalld` reads `marshall.yaml`. The file is watched and reloaded without restart.
+`marshalld` reads `marshall.yaml`. The file is watched and reloaded without a restart.
 
 ```yaml
 workspace: /tmp/marshalld
@@ -149,19 +146,26 @@ system:
   max_sleep_ms: 5000
 ```
 
-Validate without starting the server:
+Check the file without starting the server:
 
 ```sh
 cargo run --bin marshalld -- --validate-config ./marshall.yaml
 ```
 
+Requirements:
+
+- Rust 1.88 or later
+- Linux or macOS for development; Linux for `openat2`-backed path checks and container isolation
+- Optional: `python3` / `node` on `PATH` if you enable those code languages
+- Optional: `/dev/kvm` on Linux for the `container` backend
+
 ## Tools
 
-| Name | Purpose | Policy |
+| Name | Operations | Policy |
 |---|---|---|
 | `filesystem` | `read/write/list/mkdir/delete/stat/copy/move/append/search/glob/patch` | Paths must resolve under a sandbox root; `writable` gates mutating ops; reads capped at `read_limit` |
-| `shell` | Run allowlisted binaries | Absolute path, `ArgumentPolicy` (`None`, `Exact`, `NoFlags`, `Unrestricted`), timeout, 1 MiB output cap, cleared environment |
-| `http` | Outbound requests | Host allowlist, public-address check, no redirects, port allowlist, 4 MiB body cap |
+| `shell` | Run listed binaries | Absolute path, `ArgumentPolicy` (`None`, `Exact`, `NoFlags`, `Unrestricted`), timeout, output cap, cleared environment |
+| `http` | Outbound requests | Host allowlist, public-address check, no redirects, port allowlist, body caps |
 | `code` | `python` / `javascript` / `bash` via temp file | `allowed_languages`, 64 KiB source cap, timeout, output cap, sandbox working directory |
 | `system` | `now/sleep/env_get/env_list/hash/info/process_list/process_kill` | `allowed_env`, `allow_process_list`, `allow_kill`, `max_sleep_ms` |
 | `think` | Record a reasoning step | Length-bounded, always succeeds |
@@ -176,7 +180,7 @@ cargo run --bin marshalld -- --validate-config ./marshall.yaml
 
 Filesystem: roots are compared by path component, not string prefix, so `/tmp/safe` does not admit `/tmp/safe_evil`. Symlinks are resolved before the check. On Linux, resolution uses `openat2` with `RESOLVE_BENEATH` (`src/sandbox.rs`); elsewhere it falls back to `canonicalize`. The `openat2` file descriptor is not retained for I/O, and the check-then-use interval remains on non-Linux platforms.
 
-HTTP: the metadata address `169.254.169.254` is refused in its common spellings (literal, IPv4-mapped IPv6, 6to4, embedded credentials), and `tests/escapes.rs` covers each case. Host matching is case-insensitive and percent-encoded or numeric-IP forms are rejected as malformed. Redirects are disabled and the TCP connection uses the addresses returned during validation instead of resolving again. `marshalld` repeats the destination and egress checks server-side. An allowlisted host that proxies or redirects still extends trust to wherever it sends clients.
+HTTP: the metadata address `169.254.169.254` is refused in its common spellings (literal, IPv4-mapped IPv6, 6to4, embedded credentials), and `tests/escapes.rs` covers each case. Host matching is case-insensitive; percent-encoded or numeric-IP forms are rejected as malformed. Redirects are disabled and the TCP connection uses the addresses returned during validation instead of resolving again. `marshalld` repeats the destination and egress checks server-side. An allowlisted host that proxies or redirects still extends trust to wherever it sends clients.
 
 Shell: the allowlist selects the binary only. Most binaries accept options that reach the filesystem or network (`find -exec`, `git --exec-path`, `tar --to-command`), so the argument policy is the effective control. `NoFlags` blocks `-`/`--` options but remains a heuristic: a program that treats a bare positional as a script is still unsafe. No shell is spawned, so `;`, `|`, and `$(…)` in arguments have no special meaning.
 
