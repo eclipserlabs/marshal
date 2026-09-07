@@ -1,7 +1,7 @@
 # Marshall
 
-[![CI](https://github.com/wiramahendra/marshall/actions/workflows/ci.yml/badge.svg)](https://github.com/wiramahendra/marshall/actions/workflows/ci.yml)
-[![MSRV](https://img.shields.io/badge/MSRV-1.75-blue.svg)](https://github.com/wiramahendra/marshall)
+[![CI](https://github.com/wiramahendra/execution-tool/actions/workflows/ci.yml/badge.svg)](https://github.com/wiramahendra/execution-tool/actions/workflows/ci.yml)
+[![MSRV](https://img.shields.io/badge/MSRV-1.75-blue.svg)](https://github.com/wiramahendra/execution-tool)
 [![License: MIT](https://img.shields.io/badge/License-MIT-green.svg)](LICENSE)
 [![Rust](https://img.shields.io/badge/rust-edition_2021-orange.svg)](Cargo.toml)
 
@@ -49,7 +49,7 @@ cargo add marshall
 Or clone and build:
 
 ```sh
-git clone https://github.com/wiramahendra/marshall
+git clone https://github.com/wiramahendra/execution-tool
 cd marshall
 cargo build
 cargo run --bin marshalld -- --config marshall.yaml --port 3000
