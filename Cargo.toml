@@ -2,7 +2,7 @@
 name = "marshall"
 version = "0.2.0"
 edition = "2021"
-rust-version = "1.75"
+rust-version = "1.85"
 license = "MIT"
 description = "Marshall — sandboxed tool execution for agents: filesystem, shell, HTTP, code, and system behind deny-by-default policies with SSRF protection."
 repository = "https://github.com/wiramahendra/marshall"
