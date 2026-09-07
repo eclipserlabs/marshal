@@ -49,22 +49,37 @@ export class ExecutionClient {
   }
 
   // SSE streaming — yields {event, data} per chunk
+  // Accepts tuples [tool, args] or objects {tool, args, session_id, idempotency_key}.
+  // Top-level opts.sessionId scopes memory/todo/plan via inject_session_id server-side.
+  static #toRequest(entry) {
+    if (Array.isArray(entry)) {
+      const [tool, args, extra = {}] = entry;
+      return { tool, args, session_id: extra.sessionId, idempotency_key: extra.idempotencyKey };
+    }
+    return {
+      tool: entry.tool,
+      args: entry.args,
+      session_id: entry.session_id ?? entry.sessionId,
+      idempotency_key: entry.idempotency_key ?? entry.idempotencyKey,
+    };
+  }
+
   async batch(requests, opts = {}) {
-    const body = { requests: requests.map(([tool, args]) => ({ tool, args })), max_concurrency: opts.maxConcurrency };
+    const body = { requests: requests.map((e) => ExecutionClient.#toRequest(e)), max_concurrency: opts.maxConcurrency, session_id: opts.sessionId };
     const r = await this.fetch(`${this.baseUrl}/v1/execute/batch`, { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify(body) });
     if (!r.ok) throw new Error(`batch ${r.status}: ${await r.text()}`);
     return r.json();
   }
 
   async sequence(steps, opts = {}) {
-    const body = { steps: steps.map(([tool, args]) => ({ tool, args })), continue_on_error: opts.continueOnError };
+    const body = { steps: steps.map((e) => ExecutionClient.#toRequest(e)), continue_on_error: opts.continueOnError, session_id: opts.sessionId };
     const r = await this.fetch(`${this.baseUrl}/v1/execute/sequence`, { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify(body) });
     if (!r.ok) throw new Error(`sequence ${r.status}: ${await r.text()}`);
     return r.json();
   }
 
   async *stream(tool, args, opts = {}) {
-    const body = { tool, args, session_id: opts.sessionId };
+    const body = { tool, args, session_id: opts.sessionId, idempotency_key: opts.idempotencyKey };
     const r = await this.fetch(`${this.baseUrl}/v1/execute/stream`, {
       method: 'POST',
       headers: { 'content-type': 'application/json', accept: 'text/event-stream' },
