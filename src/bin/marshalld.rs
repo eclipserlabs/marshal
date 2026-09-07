@@ -368,8 +368,10 @@ fn check_session_path(sess: &Session, args: &serde_json::Value) -> Option<Respon
 }
 
 fn inject_session_id(requests: &mut [ExecuteRequest], top_sid: &Option<String>) {
-    if let Some(sid) = top_sid {
-        for r in requests.iter_mut() {
+    for r in requests.iter_mut() {
+        // Per-step session_id takes precedence; fall back to top-level.
+        let sid = r.session_id.as_ref().or(top_sid.as_ref());
+        if let Some(sid) = sid {
             if matches!(r.tool.as_str(), "memory" | "todo" | "plan")
                 && r.args.get("session_id").is_none()
             {
@@ -830,18 +832,12 @@ async fn execute_sequence(
         .into_response()
 }
 
-/// SSE streaming — for `shell` long output. Currently buffers then streams chunks
-/// (Phase 2); Phase 3 will stream truly via `backend::execute_streaming`.
+/// SSE streaming — uniform SSE for all tools (shell chunks, others single outcome).
+/// Non-shell tools emit `summary` then `done` so SDKs can always parse SSE.
 async fn execute_stream(
     State(state): State<AppState>,
     Json(req): Json<ExecuteRequest>,
 ) -> Response {
-    // Only shell streaming is meaningful; others fallback to single event.
-
-    if req.tool != "shell" {
-        return execute(State(state), Json(req)).await.into_response();
-    }
-
     let _permit = match state.semaphore.clone().try_acquire_owned() {
         Ok(p) => p,
         Err(_) => {
