@@ -298,7 +298,8 @@ fn openat2_resolve(root_fd: i32, path: &Path) -> Result<PathBuf, SandboxError> {
 #[cfg(target_os = "linux")]
 fn openat2_open_file(root_fd: i32, path: &Path) -> Result<std::fs::File, SandboxError> {
     use rustix::fs::{openat2, Mode, OFlags, ResolveFlags};
-    use std::os::unix::io::{BorrowedFd, FromRawFd, OwnedFd};
+    use std::os::fd::{FromRawFd, IntoRawFd};
+    use std::os::unix::io::BorrowedFd;
 
     let dirfd = unsafe { BorrowedFd::borrow_raw(root_fd) };
     let flags = OFlags::RDONLY | OFlags::CLOEXEC;
@@ -306,17 +307,19 @@ fn openat2_open_file(root_fd: i32, path: &Path) -> Result<std::fs::File, Sandbox
 
     match openat2(&dirfd, path, flags, Mode::empty(), resolve) {
         Ok(file) => {
-            // rustix returns OwnedFd, convert to std::fs::File via FromRawFd
-            let owned: OwnedFd = file.into();
-            // SAFETY: we own the fd
-            let std_file = unsafe { std::fs::File::from_raw_fd(owned.into_raw_fd()) };
+            // rustix returns its own OwnedFd; convert to std's so it can
+            // become a std::fs::File. SAFETY: we own the fd.
+            let owned_std: std::os::fd::OwnedFd = file.into();
+            let std_file = unsafe { std::fs::File::from_raw_fd(owned_std.into_raw_fd()) };
             Ok(std_file)
         }
         Err(e) => {
-            // Map rustix errors to SandboxError
+            // Map rustix errors to SandboxError. openat2 with RESOLVE_BENEATH
+            // reports EXDEV (and usually PERM/ACCES) when the resolved path
+            // would escape the root.
             match e {
                 rustix::io::Errno::NOENT => Err(SandboxError::Unresolvable),
-                rustix::io::Errno::NOTCAPABLE | rustix::io::Errno::PERM => {
+                rustix::io::Errno::PERM | rustix::io::Errno::ACCES | rustix::io::Errno::EXDEV => {
                     Err(SandboxError::Outside)
                 }
                 _ => Err(SandboxError::Outside),
