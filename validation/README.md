@@ -56,7 +56,7 @@ If token usage is unavailable for a provider, leave it absent → analyzer keeps
 - Each `TaskRecorder` owns one file with `Mutex<BufWriter<File>>` + `append` → concurrent tasks never collide; concurrent clones of same task share `Arc<Mutex<_>>`.
 - No daemon or DB; inspect with `cat`, `jq`, or analyzer.
 
-`variant` is `baseline` for now; future `execution_tool` variant reuses same schema shape.
+`variant` is `baseline` for now; future `marshall` variant reuses same schema shape.
 
 ### Baseline rule
 
@@ -67,8 +67,8 @@ Baseline runs **must not use compressed execution sequences** (no automatic bund
 ### Rust API (library)
 
 ```rust
-use execution_tool::experiment::{ExperimentRecorder, TaskOutcome, TokenUsage};
-use execution_tool::experiment::collector::collect_repo_state;
+use marshall::experiment::{ExperimentRecorder, TaskOutcome, TokenUsage};
+use marshall::experiment::collector::collect_repo_state;
 
 let exp = ExperimentRecorder::new("exp_2025_09_01", "baseline", "./experiments")?;
 let task = exp.task_recorder("bug_fix_001")?;
@@ -77,7 +77,7 @@ let task = exp.task_recorder("bug_fix_001")?;
 task.task_started(
     Some("bug_fix".into()),
     Some("fix pagination off-by-one".into()),
-    Some("execution-tool@HEAD".into()),
+    Some("marshall@HEAD".into()),
     Some(collect_repo_state(None)),
     Some("my-harness".into()),
     Some("0.1.0".into()),
@@ -91,7 +91,7 @@ task.agent_turn_completed("turn_1", Some(1200), Some("mock-model".into()), Some(
     Some(TokenUsage{ input_tokens: Some(800), output_tokens: Some(200), ..Default::default() }))?;
 
 // 3. tool calls — via instrumentation wrappers (measurement separate from semantics)
-use execution_tool::experiment::instrumentation::instrument_execute;
+use marshall::experiment::instrumentation::instrument_execute;
 use serde_json::json;
 // underlying outcome unchanged; trace emitted best-effort
 let outcome = instrument_execute(&registry, &task, Some("turn_1".into()), "call_1", "filesystem",
@@ -165,7 +165,7 @@ Analyzer rules:
 ```
 
 - 3 sample entries (bug_fix, feature, investigation) marked `SAMPLE` for parser validation only — no synthetic results.
-- Real baseline corpus should be 15-25 tasks per spec, each run as both `baseline` and future `execution_tool` variant by `task_id` for A/B.
+- Real baseline corpus should be 15-25 tasks per spec, each run as both `baseline` and future `marshall` variant by `task_id` for A/B.
 
 ## After this harness
 
