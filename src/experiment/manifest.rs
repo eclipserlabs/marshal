@@ -62,10 +62,30 @@ pub struct TaskManifest {
 
 impl TaskManifest {
     pub fn from_json(s: &str) -> anyhow::Result<Self> {
-        Ok(serde_json::from_str(s)?)
+        let m: Self = serde_json::from_str(s)?;
+        m.validate()?;
+        Ok(m)
     }
     pub fn from_yaml(s: &str) -> anyhow::Result<Self> {
-        Ok(serde_yaml::from_str(s)?)
+        let m: Self = serde_yaml::from_str(s)?;
+        m.validate()?;
+        Ok(m)
+    }
+
+    /// Complexity must be empty (unset) or one of simple/medium/complex.
+    pub fn validate(&self) -> anyhow::Result<()> {
+        for t in &self.tasks {
+            if !t.complexity.is_empty()
+                && !matches!(t.complexity.as_str(), "simple" | "medium" | "complex")
+            {
+                anyhow::bail!(
+                    "invalid complexity '{}' for task {}: expected simple/medium/complex",
+                    t.complexity,
+                    t.task_id
+                );
+            }
+        }
+        Ok(())
     }
 }
 
@@ -92,5 +112,22 @@ mod tests {
         let m = TaskManifest::from_json(json).unwrap();
         assert_eq!(m.tasks.len(), 1);
         assert_eq!(m.tasks[0].category, TaskCategory::BugFix);
+    }
+
+    #[test]
+    fn invalid_complexity_is_rejected() {
+        let json = r#"{
+            "schema_version": "validation.v1",
+            "tasks": [{
+                "task_id": "t1",
+                "title": "x",
+                "category": "bug_fix",
+                "description": "x",
+                "complexity": "hard",
+                "verification_commands_or_checks": [],
+                "success_criteria": "x"
+            }]
+        }"#;
+        assert!(TaskManifest::from_json(json).is_err());
     }
 }
