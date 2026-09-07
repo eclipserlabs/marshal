@@ -17,7 +17,7 @@
 //! type exists but returns `unsupported`.
 
 use std::collections::HashMap;
-use std::path::{Path, PathBuf};
+use std::path::PathBuf;
 use std::process::Stdio;
 use std::sync::Arc;
 use std::time::Duration;
@@ -665,7 +665,7 @@ impl ContainerBackend {
 
     #[cfg(target_os = "linux")]
     fn is_kvm_available() -> bool {
-        Path::new("/dev/kvm").exists()
+        std::path::Path::new("/dev/kvm").exists()
     }
 
     #[cfg(not(target_os = "linux"))]
