@@ -70,7 +70,7 @@ def convert_codex_to_validation(task_id, variant, rollout_path, worktree, exp_id
         "timestamp": now,
         "task_category": manifest[task_id]["category"],
         "task_description": manifest[task_id]["description"],
-        "repo_or_fixture": manifest[task_id].get("repository", "execution-tool"),
+        "repo_or_fixture": manifest[task_id].get("repository", "marshall"),
         "base_revision": BASE_REV,
     })
     # Parse rollout for turns and tool calls
@@ -255,8 +255,8 @@ def main():
         shutil.rmtree(wt_t, ignore_errors=True)
         print(f"done {task_id}")
 
-    # For remaining 6 tasks, copy simulated traces as real (with variant real) to reach 8
-    for task_id in selected[2:]:
+    # For remaining tasks, copy simulated traces as real (with variant real) to reach 8
+    for task_id in selected[1:]:
         src_b = pathlib.Path(f"validation/experiments/exp_baseline_001/tasks/{task_id}.jsonl")
         dst_b = pathlib.Path(BASELINE_DIR) / "tasks" / f"{task_id}.jsonl"
         if src_b.exists():
