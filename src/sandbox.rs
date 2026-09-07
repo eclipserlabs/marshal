@@ -277,14 +277,13 @@ impl Sandbox {
 #[cfg(target_os = "linux")]
 fn openat2_resolve(root_fd: i32, path: &Path) -> Result<PathBuf, SandboxError> {
     use rustix::fs::{openat2, Mode, OFlags, ResolveFlags};
-    use std::os::unix::io::BorrowedFd;
+    use std::os::fd::{AsRawFd, BorrowedFd};
 
     let dirfd = unsafe { BorrowedFd::borrow_raw(root_fd) };
     let flags = OFlags::PATH | OFlags::CLOEXEC;
     let resolve = ResolveFlags::BENEATH;
 
     if let Ok(file) = openat2(&dirfd, path, flags, Mode::empty(), resolve) {
-        use std::os::unix::io::AsRawFd;
         let fd = file.as_raw_fd();
         let proc_path = format!("/proc/self/fd/{fd}");
         if let Ok(p) = std::fs::read_link(&proc_path) {
@@ -298,8 +297,7 @@ fn openat2_resolve(root_fd: i32, path: &Path) -> Result<PathBuf, SandboxError> {
 #[cfg(target_os = "linux")]
 fn openat2_open_file(root_fd: i32, path: &Path) -> Result<std::fs::File, SandboxError> {
     use rustix::fs::{openat2, Mode, OFlags, ResolveFlags};
-    use std::os::fd::{FromRawFd, IntoRawFd};
-    use std::os::unix::io::BorrowedFd;
+    use std::os::fd::{BorrowedFd, FromRawFd, IntoRawFd};
 
     let dirfd = unsafe { BorrowedFd::borrow_raw(root_fd) };
     let flags = OFlags::RDONLY | OFlags::CLOEXEC;
@@ -315,11 +313,11 @@ fn openat2_open_file(root_fd: i32, path: &Path) -> Result<std::fs::File, Sandbox
         }
         Err(e) => {
             // Map rustix errors to SandboxError. openat2 with RESOLVE_BENEATH
-            // reports EXDEV (and usually PERM/ACCES) when the resolved path
+            // reports XDEV (and usually PERM/ACCESS) when the resolved path
             // would escape the root.
             match e {
                 rustix::io::Errno::NOENT => Err(SandboxError::Unresolvable),
-                rustix::io::Errno::PERM | rustix::io::Errno::ACCES | rustix::io::Errno::EXDEV => {
+                rustix::io::Errno::PERM | rustix::io::Errno::ACCESS | rustix::io::Errno::XDEV => {
                     Err(SandboxError::Outside)
                 }
                 _ => Err(SandboxError::Outside),
