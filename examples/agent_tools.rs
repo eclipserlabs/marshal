@@ -13,7 +13,7 @@ use serde_json::json;
 
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
-    let workspace = std::env::temp_dir().join("exectool_example");
+    let workspace = std::env::temp_dir().join("marshall_example");
     std::fs::create_dir_all(&workspace)?;
     std::fs::write(workspace.join("notes.txt"), "the quick brown fox\n")?;
 
