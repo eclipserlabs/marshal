@@ -602,7 +602,7 @@ fn truncate_bytes(mut v: Vec<u8>, limit: usize) -> (Vec<u8>, bool) {
 /// `LocalProcessBackend` with a warning.
 ///
 /// Wiring (see `docs/ARCHITECTURE.md:19`):
-/// ```rust,ignore
+/// ```text
 /// // Pool per workspace: watchdog::Pool::new(Config{
 /// //   kernel: "vmlinux", rootfs: "alpine.ext4", vsock: "/tmp/firecracker.sock",
 /// //   cgroup: Limits{ memory_bytes: Some(128<<20), pids_max: Some(64) },
