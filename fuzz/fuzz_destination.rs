@@ -3,13 +3,24 @@ use marshall::{destination::host_of, validate_destination};
 fn main() {
     // libFuzzer entry: cargo fuzz run fuzz_destination
     // For `cargo run --bin fuzz_destination` we run a simple corpus.
-    let args: Vec<String> = std::env::args().collect();
-    if args.len() > 1 {
-        let input = args[1].as_str();
+    // `cargo run --bin fuzz_destination -- <url>` checks a single URL.
+    let inputs: Vec<String> = std::env::args().skip(1).filter(|a| a != "--").collect();
+    if let Some(input) = inputs.first() {
+        // Historical README used `-- 10` as a count; treat a bare number as
+        // "run corpus" for backwards compat instead of silently checking "10".
+        if input.parse::<usize>().is_ok() {
+            run_corpus();
+            return;
+        }
         let _ = host_of(input);
         let _ = validate_destination(input);
+        println!("checked: {input}");
         return;
     }
+    run_corpus();
+}
+
+fn run_corpus() {
     // Simple inline corpus smoke
     let corpus = [
         "https://example.com/",
