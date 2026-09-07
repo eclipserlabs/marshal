@@ -1,13 +1,29 @@
 # Marshall
 
-[![CI](https://github.com/wiramahendra/execution-tool/actions/workflows/ci.yml/badge.svg)](https://github.com/wiramahendra/execution-tool/actions/workflows/ci.yml)
-[![MSRV](https://img.shields.io/badge/MSRV-1.75-blue.svg)](https://github.com/wiramahendra/execution-tool)
+[![CI](https://github.com/rapture-fx/Marshall/actions/workflows/ci.yml/badge.svg)](https://github.com/rapture-fx/Marshall/actions/workflows/ci.yml)
+[![Version](https://img.shields.io/badge/version-0.2.0-blue.svg)](Cargo.toml)
+[![MSRV](https://img.shields.io/badge/MSRV-1.85-blue.svg)](Cargo.toml)
 [![License: MIT](https://img.shields.io/badge/License-MIT-green.svg)](LICENSE)
 [![Rust](https://img.shields.io/badge/rust-edition_2021-orange.svg)](Cargo.toml)
 
 Policy-checked tool execution for agents, as a Rust library and an HTTP service (`marshalld`).
 
 Every tool denies by default. Filesystem paths must resolve under a configured root, HTTP hosts must be allowlisted and resolve to public addresses, shell programs must be listed with an explicit argument policy, and code runs only in allowlisted languages. An unconfigured tool refuses all calls.
+
+## Contents
+
+- [Features](#features)
+- [Requirements](#requirements)
+- [Installation](#installation)
+- [Library usage](#library-usage)
+- [Configuration](#configuration)
+- [Tools](#tools)
+- [Security notes](#security-notes)
+- [HTTP API](#http-api)
+- [SDKs](#sdks)
+- [Development](#development)
+- [Limitations](#limitations)
+- [License](#license)
 
 ```rust
 use std::sync::Arc;
@@ -35,7 +51,7 @@ tools.register(Arc::new(HttpTool::new(["api.github.com"])));
 
 ## Requirements
 
-- Rust 1.75 or later
+- Rust 1.85 or later
 - Linux or macOS for development; Linux for `openat2`-backed path checks and container isolation
 - Optional: `python3` / `node` on `PATH` if you enable those code languages
 - Optional: `/dev/kvm` on Linux for the `container` backend
@@ -49,8 +65,8 @@ cargo add marshall
 Or clone and build:
 
 ```sh
-git clone https://github.com/wiramahendra/execution-tool
-cd marshall
+git clone https://github.com/rapture-fx/Marshall.git
+cd Marshall
 cargo build
 cargo run --bin marshalld -- --config marshall.yaml --port 3000
 ```
