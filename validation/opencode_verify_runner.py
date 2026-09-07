@@ -72,11 +72,11 @@ def collect_repo_state(workdir):
     dirty = bool(status.strip())
     changed=[]
     for line in status.splitlines():
-        if len(line)>=3:
-            path=line[3:].strip()
+        if len(line)>=2:
+            path=line[2:].strip()
             if " -> " in path:
-                path=path.split(" -> ")[1]
-            if path: changed.append(path)
+                path=path.split(" -> ")[1].strip()
+            if path and not path.startswith("…"): changed.append(path)
     # diff numstat
     diff_raw = run(["diff","--numstat","HEAD"]) or run(["diff","--numstat"]) or ""
     ins=del_=0
@@ -173,7 +173,7 @@ def run_one(task_id, variant, adopt):
         events.append(ev)
         return ev
     # task_started
-    emit("task_started", task_category=task["category"], task_description=task["description"], repo_or_fixture=task.get("repository","execution-tool"), base_revision=BASE_REV, repo_before=repo_before, harness="opencode-verify-runner", harness_version="0.1.0")
+    emit("task_started", task_category=task["category"], task_description=task["description"], repo_or_fixture=task.get("repository","marshall"), base_revision=BASE_REV, repo_before=repo_before, harness="opencode-verify-runner", harness_version="0.1.0")
     # Simulate agent turns with genuine tool operations
     # Turn 1: investigation reads
     turn_id="turn_1"
