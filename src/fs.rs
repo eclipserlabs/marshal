@@ -780,7 +780,6 @@ async fn read_capped_from_file(
     mut file: tokio::fs::File,
     limit: usize,
 ) -> std::io::Result<(Vec<u8>, usize, bool)> {
-    use tokio::io::AsyncReadExt;
     read_capped_from_file_helper(&mut file, limit).await
 }
 
