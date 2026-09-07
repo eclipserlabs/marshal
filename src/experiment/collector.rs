@@ -52,15 +52,19 @@ pub fn collect_repo_state(workdir: Option<&Path>) -> RepoStateSnapshot {
     let mut changed_files = Vec::new();
     for line in status.lines() {
         // porcelain: XY<space>path  or  XY<space>old -> new
-        if line.len() >= 3 {
-            let path = line[3..].trim();
+        // Real porcelain is 2 status chars + space (e.g. " M Cargo.toml").
+        // Be tolerant of malformed lines missing the leading space (e.g. "M Cargo.toml")
+        // by stripping 2 chars then leading whitespace instead of hard line[3..].
+        if line.len() >= 2 {
+            let path = line.get(2..).unwrap_or("").trim_start().trim();
             // Handle renames: "old -> new"
             let file = if let Some((_, after)) = path.split_once(" -> ") {
-                after
+                after.trim()
             } else {
                 path
             };
-            if !file.is_empty() {
+            // Skip truncation marker appended above.
+            if !file.is_empty() && !file.starts_with('…') {
                 changed_files.push(file.to_string());
             }
         }
