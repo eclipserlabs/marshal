@@ -56,6 +56,62 @@ struct AppState {
     audit_lock: Arc<Mutex<()>>,
     /// Egress allowlist from ExecutionPolicy (host file) — server-side enforcement.
     egress_hosts: Arc<Mutex<Vec<String>>>,
+    /// Optional bearer token (`MARSHALLD_API_TOKEN`). If set, `/v1/*`
+    /// requires `Authorization: Bearer <token>`.
+    auth_token: Option<String>,
+    /// Session TTL (`MARSHALLD_SESSION_TTL_SECS`, default 3600s).
+    session_ttl: Duration,
+}
+
+/// Default session TTL: 1h.
+fn session_ttl_from_env() -> Duration {
+    std::env::var("MARSHALLD_SESSION_TTL_SECS")
+        .ok()
+        .and_then(|s| s.parse::<u64>().ok())
+        .map(Duration::from_secs)
+        .unwrap_or_else(|| Duration::from_secs(3600))
+}
+
+fn auth_token_from_env() -> Option<String> {
+    std::env::var("MARSHALLD_API_TOKEN")
+        .ok()
+        .map(|s| s.trim().to_string())
+        .filter(|s| !s.is_empty())
+}
+
+/// 401 response when the bearer token is missing/wrong. `None` = authorized.
+fn check_auth(headers: &axum::http::HeaderMap, state: &AppState) -> Option<Response> {
+    let expected = match &state.auth_token {
+        Some(t) => t,
+        None => return None,
+    };
+    let got = headers
+        .get(axum::http::header::AUTHORIZATION)
+        .and_then(|v| v.to_str().ok())
+        .unwrap_or("");
+    // Constant-shape comparison to avoid leaking prefix length via timing.
+    let ok = got.strip_prefix("Bearer ").is_some_and(|tok| {
+        tok.len() == expected.len()
+            && tok
+                .bytes()
+                .zip(expected.bytes())
+                .fold(0u8, |acc, (a, b)| acc | (a ^ b))
+                == 0
+    });
+    if ok {
+        None
+    } else {
+        Some(
+            (
+                StatusCode::UNAUTHORIZED,
+                Json(ErrorResponse {
+                    error: "unauthorized".into(),
+                    code: "unauthorized".into(),
+                }),
+            )
+                .into_response(),
+        )
+    }
 }
 
 #[derive(Debug)]
@@ -173,6 +229,40 @@ struct Session {
     created: Instant,
 }
 
+impl Session {
+    fn is_expired(&self, ttl: Duration) -> bool {
+        self.created.elapsed() > ttl
+    }
+}
+
+/// Remove expired sessions + their workspace dirs. Returns count removed.
+async fn purge_expired_sessions(state: &AppState) -> usize {
+    let ttl = state.session_ttl;
+    let mut sessions = state.sessions.lock().await;
+    let expired: Vec<(String, PathBuf)> = sessions
+        .iter()
+        .filter(|(_, s)| s.is_expired(ttl))
+        .map(|(id, s)| (id.clone(), s.root.clone()))
+        .collect();
+    let n = expired.len();
+    for (id, root) in expired {
+        sessions.remove(&id);
+        let _ = std::fs::remove_dir_all(&root);
+        info!(session_id = %id, "session expired");
+    }
+    n
+}
+
+fn spawn_session_sweeper(state: AppState) {
+    tokio::spawn(async move {
+        let mut interval = tokio::time::interval(Duration::from_secs(60));
+        loop {
+            interval.tick().await;
+            purge_expired_sessions(&state).await;
+        }
+    });
+}
+
 // ---------------------------------------------------------------------------
 // Request/Response types
 // ---------------------------------------------------------------------------
@@ -271,15 +361,25 @@ async fn metrics(State(state): State<AppState>) -> impl IntoResponse {
 }
 
 #[tracing::instrument(skip(state))]
-async fn list_tools(State(state): State<AppState>) -> impl IntoResponse {
+async fn list_tools(
+    State(state): State<AppState>,
+    headers: axum::http::HeaderMap,
+) -> impl IntoResponse {
+    if let Some(resp) = check_auth(&headers, &state) {
+        return resp;
+    }
     let registry = state.registry.read().await.clone();
-    Json(registry.definitions())
+    Json(registry.definitions()).into_response()
 }
 
 async fn create_session(
     State(state): State<AppState>,
+    headers: axum::http::HeaderMap,
     Json(_req): Json<CreateSessionRequest>,
 ) -> impl IntoResponse {
+    if let Some(resp) = check_auth(&headers, &state) {
+        return resp;
+    }
     let id = uuid::Uuid::new_v4().to_string();
     let root = state.workspace_root.join(&id);
     if let Err(e) = std::fs::create_dir_all(&root) {
@@ -387,7 +487,14 @@ fn inject_session_id(requests: &mut [ExecuteRequest], top_sid: &Option<String>) 
 }
 
 #[tracing::instrument(skip(state, req), fields(tool = %req.tool))]
-async fn execute(State(state): State<AppState>, Json(req): Json<ExecuteRequest>) -> Response {
+async fn execute(
+    State(state): State<AppState>,
+    headers: axum::http::HeaderMap,
+    Json(req): Json<ExecuteRequest>,
+) -> Response {
+    if let Some(resp) = check_auth(&headers, &state) {
+        return resp;
+    }
     state.metrics.inc_request();
     // Concurrency guard — 503 if at cap (pool).
     let _permit = match state.semaphore.clone().try_acquire_owned() {
@@ -407,8 +514,20 @@ async fn execute(State(state): State<AppState>, Json(req): Json<ExecuteRequest>)
 
     // Session validation: if session_id given, ensure it exists and paths are inside it.
     if let Some(sid) = &req.session_id {
+        // Opportunistically drop expired sessions before lookup.
+        purge_expired_sessions(&state).await;
         let sessions = state.sessions.lock().await;
         if let Some(sess) = sessions.get(sid) {
+            if sess.is_expired(state.session_ttl) {
+                return (
+                    StatusCode::NOT_FOUND,
+                    Json(ErrorResponse {
+                        error: format!("session expired: {sid}"),
+                        code: "session_expired".into(),
+                    }),
+                )
+                    .into_response();
+            }
             if let Some(resp) = check_session_path(sess, &req.args) {
                 return resp;
             }
@@ -512,8 +631,13 @@ async fn execute(State(state): State<AppState>, Json(req): Json<ExecuteRequest>)
 
 async fn execute_batch(
     State(state): State<AppState>,
+    headers: axum::http::HeaderMap,
     Json(mut req): Json<BatchRequest>,
 ) -> Response {
+    if let Some(resp) = check_auth(&headers, &state) {
+        return resp;
+    }
+    purge_expired_sessions(&state).await;
     // Auto-scope agentic state to top-level session
     inject_session_id(&mut req.requests, &req.session_id);
     // Admission control: limit batch size and concurrency to avoid OOM / fan-out.
@@ -688,8 +812,13 @@ async fn execute_batch(
 
 async fn execute_sequence(
     State(state): State<AppState>,
+    headers: axum::http::HeaderMap,
     Json(mut req): Json<SequenceRequest>,
 ) -> Response {
+    if let Some(resp) = check_auth(&headers, &state) {
+        return resp;
+    }
+    purge_expired_sessions(&state).await;
     // Auto-scope agentic state to top-level session
     inject_session_id(&mut req.steps, &req.session_id);
     const MAX_STEPS: usize = 32;
@@ -836,8 +965,12 @@ async fn execute_sequence(
 /// Non-shell tools emit `summary` then `done` so SDKs can always parse SSE.
 async fn execute_stream(
     State(state): State<AppState>,
+    headers: axum::http::HeaderMap,
     Json(req): Json<ExecuteRequest>,
 ) -> Response {
+    if let Some(resp) = check_auth(&headers, &state) {
+        return resp;
+    }
     let _permit = match state.semaphore.clone().try_acquire_owned() {
         Ok(p) => p,
         Err(_) => {
@@ -909,8 +1042,12 @@ async fn execute_stream(
 
 async fn delete_session(
     State(state): State<AppState>,
+    headers: axum::http::HeaderMap,
     AxumPath(id): AxumPath<String>,
 ) -> impl IntoResponse {
+    if let Some(resp) = check_auth(&headers, &state) {
+        return resp;
+    }
     let mut sessions = state.sessions.lock().await;
     if let Some(sess) = sessions.remove(&id) {
         let _ = std::fs::remove_dir_all(&sess.root);
@@ -1229,7 +1366,13 @@ async fn main() -> anyhow::Result<()> {
         metrics: Arc::new(Metrics::default()),
         audit_lock: Arc::new(Mutex::new(())),
         egress_hosts: Arc::new(Mutex::new(Vec::new())),
+        auth_token: auth_token_from_env(),
+        session_ttl: session_ttl_from_env(),
     };
+    if state.auth_token.is_none() {
+        warn!("MARSHALLD_API_TOKEN not set: /v1/* is unauthenticated (localhost only recommended)");
+    }
+    spawn_session_sweeper(state.clone());
 
     let app = build_router(state);
 
@@ -1274,7 +1417,13 @@ async fn serve(
         metrics: Arc::new(Metrics::default()),
         audit_lock: Arc::new(Mutex::new(())),
         egress_hosts: Arc::new(Mutex::new(initial_hosts)),
+        auth_token: auth_token_from_env(),
+        session_ttl: session_ttl_from_env(),
     };
+    if state.auth_token.is_none() {
+        warn!("MARSHALLD_API_TOKEN not set: /v1/* is unauthenticated (localhost only recommended)");
+    }
+    spawn_session_sweeper(state.clone());
 
     // Hot reload: watch config file and swap registry atomically, including egress hosts.
     if let Some(cfg) = config_path.clone() {
@@ -1336,6 +1485,28 @@ async fn serve(
 }
 
 fn build_router(state: AppState) -> Router {
+    // CORS: `MARSHALLD_CORS_ORIGIN=https://app.example.com` restricts to one
+    // origin; unset keeps `AllowOrigin::any()` for local dev (logged).
+    let cors = {
+        let mut layer = tower_http::cors::CorsLayer::new().allow_methods([
+            axum::http::Method::GET,
+            axum::http::Method::POST,
+            axum::http::Method::DELETE,
+        ]);
+        layer = layer.allow_headers([
+            axum::http::header::CONTENT_TYPE,
+            axum::http::header::AUTHORIZATION,
+        ]);
+        if let Ok(origin) = std::env::var("MARSHALLD_CORS_ORIGIN") {
+            if let Ok(val) = origin.parse::<axum::http::HeaderValue>() {
+                layer.allow_origin(tower_http::cors::AllowOrigin::exact(val))
+            } else {
+                layer.allow_origin(tower_http::cors::AllowOrigin::any())
+            }
+        } else {
+            layer.allow_origin(tower_http::cors::AllowOrigin::any())
+        }
+    };
     Router::new()
         .route("/health", get(health))
         .route("/metrics", get(metrics))
@@ -1349,19 +1520,16 @@ fn build_router(state: AppState) -> Router {
         .route("/v1/policy", get(get_policy))
         .with_state(state)
         .layer(tower_http::trace::TraceLayer::new_for_http())
-        .layer(
-            tower_http::cors::CorsLayer::new()
-                .allow_origin(tower_http::cors::AllowOrigin::any())
-                .allow_methods([
-                    axum::http::Method::GET,
-                    axum::http::Method::POST,
-                    axum::http::Method::DELETE,
-                ])
-                .allow_headers([axum::http::header::CONTENT_TYPE]),
-        )
+        .layer(cors)
 }
 
-async fn get_policy(State(_state): State<AppState>) -> impl IntoResponse {
+async fn get_policy(
+    State(state): State<AppState>,
+    headers: axum::http::HeaderMap,
+) -> impl IntoResponse {
+    if let Some(resp) = check_auth(&headers, &state) {
+        return resp;
+    }
     // Return current marshall.yaml if present, else defaults.
     let path = PathBuf::from("marshall.yaml");
     if path.exists() {
