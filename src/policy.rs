@@ -286,6 +286,8 @@ impl ExecutionPolicy {
             if !Path::new(&c.program).is_absolute() {
                 anyhow::bail!("absolute path required: {}", c.program);
             }
+            // Reject weak policies for interpreters at load time (fail closed).
+            crate::shell::validate_policy_for_program(&c.program, &c.args.clone().into_policy())?;
         }
         // hosts must be lowercased, no wildcards, no whitespace/control
         for h in &self.http.allowed_hosts {
