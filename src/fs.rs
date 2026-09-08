@@ -1084,7 +1084,7 @@ mod tests {
         let read_only = f.tool().parameters_schema();
         assert_eq!(
             read_only["properties"]["operation"]["enum"],
-            json!(["read", "list", "stat", "search", "glob"])
+            json!(["read", "list", "stat", "search", "glob", "exists"])
         );
 
         let writable = f.tool().writable().parameters_schema();
@@ -1092,7 +1092,7 @@ mod tests {
             writable["properties"]["operation"]["enum"],
             json!([
                 "read", "write", "list", "mkdir", "delete", "stat", "copy", "move", "append",
-                "search", "glob", "patch"
+                "search", "glob", "patch", "exists"
             ])
         );
     }
