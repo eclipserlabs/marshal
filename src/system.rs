@@ -150,7 +150,7 @@ impl Tool for SystemTool {
             "properties": {
                 "operation": {
                     "type": "string",
-                    "enum": ["now", "sleep", "env_get", "env_list", "hash", "info", "process_list", "process_kill"],
+                    "enum": ["now", "sleep", "env_get", "env_list", "hash", "info", "limits", "process_list", "process_kill"],
                     "description": "Which query to run."
                 },
                 "duration_ms": {
@@ -202,7 +202,7 @@ impl Tool for SystemTool {
                 }
                 Ok(())
             }
-            "now" | "env_list" | "info" => Ok(()),
+            "now" | "env_list" | "info" | "limits" => Ok(()),
             "sleep" => {
                 let ms = args
                     .get("duration_ms")
@@ -340,7 +340,19 @@ impl Tool for SystemTool {
                     "os": std::env::consts::OS,
                     "arch": std::env::consts::ARCH,
                     "pid": std::process::id(),
+                    "cpus": std::thread::available_parallelism().map(|n| n.get()).unwrap_or(1),
                     "unix_ms": now_ms(),
+                    "redaction_policy_version": crate::REDACTION_POLICY_VERSION,
+                });
+                Ok(ToolOutcome::success("system", summary, elapsed(started)))
+            }
+            "limits" => {
+                let summary = json!({
+                    "operation": "limits",
+                    "max_sleep_ms": self.policy.max_sleep_ms,
+                    "allow_process_list": self.policy.allow_process_list,
+                    "allow_kill": self.policy.allow_kill,
+                    "allowed_env_count": self.policy.allowed_env.len(),
                     "redaction_policy_version": crate::REDACTION_POLICY_VERSION,
                 });
                 Ok(ToolOutcome::success("system", summary, elapsed(started)))
@@ -433,6 +445,16 @@ fn read_proc_table() -> Vec<Value> {
 }
 
 fn execute_process_kill(started: Instant, pid: i32, sig: &str) -> Result<ToolOutcome> {
+    // Scope kills to session children on Linux: walk /proc ppid chain to self.
+    // This prevents signalling arbitrary permitted pids (e.g. pid 1's siblings).
+    #[cfg(target_os = "linux")]
+    if !is_descendant_process(pid as u32) {
+        return Ok(ToolOutcome::failure(
+            "system",
+            "kill_not_child",
+            elapsed(started),
+        ));
+    }
     let signal = match sig {
         "term" => rustix::process::Signal::Term,
         "kill" => rustix::process::Signal::Kill,
@@ -460,6 +482,43 @@ fn execute_process_kill(started: Instant, pid: i32, sig: &str) -> Result<ToolOut
             Ok(ToolOutcome::failure("system", code, elapsed(started)))
         }
     }
+}
+
+/// Whether `pid` is a descendant of this process (Linux `/proc` ppid walk).
+/// Returns false for self/0/1, unknown pids, and anything outside our subtree.
+#[cfg(target_os = "linux")]
+fn is_descendant_process(pid: u32) -> bool {
+    let self_pid = std::process::id();
+    if pid == 0 || pid == 1 || pid == self_pid {
+        return false;
+    }
+    let mut current = pid;
+    // Bound walk to avoid cycles; PID namespaces are shallow.
+    for _ in 0..64 {
+        let ppid = match parent_pid_of(current) {
+            Some(p) => p,
+            None => return false,
+        };
+        if ppid == self_pid {
+            return true;
+        }
+        if ppid == 0 || ppid == 1 || ppid == current {
+            return false;
+        }
+        current = ppid;
+    }
+    false
+}
+
+/// Read ppid from `/proc/<pid>/stat` (field 4 after `comm`).
+#[cfg(target_os = "linux")]
+fn parent_pid_of(pid: u32) -> Option<u32> {
+    let s = std::fs::read_to_string(format!("/proc/{pid}/stat")).ok()?;
+    let close = s.rfind(')')?;
+    let mut parts = s[close + 2..].split_whitespace();
+    let _state = parts.next()?;
+    let ppid = parts.next()?;
+    ppid.parse::<u32>().ok()
 }
 
 #[cfg(test)]
