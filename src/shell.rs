@@ -64,6 +64,38 @@ impl ArgumentPolicy {
     }
 }
 
+/// Binary names that treat a bare positional as code/script and therefore
+/// must never use `NoFlags`/`Unrestricted`. Use `Exact` vectors instead.
+pub const INTERPRETER_BINARIES: &[&str] = &[
+    "sh", "bash", "dash", "zsh", "fish", "python", "python3", "node", "nodejs", "deno", "bun",
+    "perl", "ruby", "php", "lua", "awk", "gawk",
+];
+
+/// Whether `program` is a known interpreter by file name.
+pub fn is_interpreter_program(program: &str) -> bool {
+    let base = program.rsplit('/').next().unwrap_or(program);
+    // Allow versioned names like `python3.11`.
+    let stem = base.split('.').next().unwrap_or(base);
+    INTERPRETER_BINARIES.contains(&base)
+        || INTERPRETER_BINARIES.contains(&stem)
+        || base.starts_with("python")
+}
+
+/// Reject `NoFlags`/`Unrestricted` for interpreters. Returns `Err` with a
+/// stable code string (`noflags_for_interpreter` / `unrestricted_for_interpreter`).
+pub fn validate_policy_for_program(program: &str, policy: &ArgumentPolicy) -> anyhow::Result<()> {
+    if is_interpreter_program(program) {
+        match policy {
+            ArgumentPolicy::NoFlags => anyhow::bail!("noflags_for_interpreter: {program}"),
+            ArgumentPolicy::Unrestricted => {
+                anyhow::bail!("unrestricted_for_interpreter: {program}")
+            }
+            _ => {}
+        }
+    }
+    Ok(())
+}
+
 /// One permitted command.
 #[derive(Debug, Clone)]
 pub struct AllowedCommand {
@@ -285,6 +317,9 @@ impl ShellTool {
         if !allowed.arguments.permits(&arguments) {
             bail!("arguments_not_allowed");
         }
+        // Harden `NoFlags` heuristic: interpreters treat a bare positional as
+        // code, so `NoFlags`/`Unrestricted` is never safe for them.
+        validate_policy_for_program(program, &allowed.arguments)?;
 
         let working_dir = match args.get("working_dir").and_then(Value::as_str) {
             None => None,
