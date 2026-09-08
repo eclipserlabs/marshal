@@ -79,17 +79,17 @@ impl Tool for FileSystemTool {
     }
 
     fn description(&self) -> &str {
-        "Filesystem within sandbox — read/write/list/mkdir/delete/stat/copy/move/append/search/glob/patch. Use read to inspect, search/glob to discover, write/patch to edit. Prefer patch for single-line edits, write for new files. All paths must be inside sandbox; see sandbox error codes."
+        "Filesystem within sandbox — read/write/list/mkdir/delete/stat/copy/move/append/search/glob/patch/exists. Use read to inspect, search/glob to discover, write/patch to edit. Prefer patch for single-line edits, write for new files. All paths must be inside sandbox; see sandbox error codes."
     }
 
     fn parameters_schema(&self) -> Value {
         let operations: Vec<&str> = if self.writable {
             vec![
                 "read", "write", "list", "mkdir", "delete", "stat", "copy", "move", "append",
-                "search", "glob", "patch",
+                "search", "glob", "patch", "exists",
             ]
         } else {
-            vec!["read", "list", "stat", "search", "glob"]
+            vec!["read", "list", "stat", "search", "glob", "exists"]
         };
         json!({
             "type": "object",
@@ -118,6 +118,18 @@ impl Tool for FileSystemTool {
         let path = Self::raw_path(args)?;
 
         match operation {
+            "exists" => {
+                // Read-only probe: missing -> exists:false, outside -> policy error
+                // (so it cannot be used as an oracle for paths outside the sandbox).
+                match self.sandbox.resolve_existing(path) {
+                    Ok(p) => {
+                        let _ = p;
+                        Ok(())
+                    }
+                    Err(SandboxError::Unresolvable) => Ok(()),
+                    Err(e) => Err(policy_error(e)),
+                }?;
+            }
             "read" | "list" | "stat" | "search" | "glob" => {
                 self.sandbox.resolve_existing(path).map_err(policy_error)?;
                 if operation == "search" {
@@ -730,6 +742,22 @@ impl Tool for FileSystemTool {
                     }
                 }
             }
+
+            "exists" => match self.sandbox.resolve_existing(raw) {
+                Ok(p) => Ok(ToolOutcome::success(
+                    "filesystem",
+                    json!({"operation": "exists", "exists": true, "path": p.display().to_string()}),
+                    elapsed(started),
+                )
+                .with_metadata("operation", "exists")),
+                Err(SandboxError::Unresolvable) => Ok(ToolOutcome::success(
+                    "filesystem",
+                    json!({"operation": "exists", "exists": false}),
+                    elapsed(started),
+                )
+                .with_metadata("operation", "exists")),
+                Err(e) => Err(policy_error(e)),
+            },
 
             other => Ok(ToolOutcome::failure(
                 "filesystem",
