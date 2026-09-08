@@ -38,7 +38,7 @@ base64 = "0.22"
 wasmtime = { version = "22", optional = true }
 wasmtime-wasi = { version = "22", optional = true }
 cap-std = { version = "3.0", optional = true }
-watchdog = { git = "https://github.com/wiramahendra/watchdog", branch = "main", optional = true }
+watchdog = { git = "https://github.com/wiramahendra/watchdog", rev = "ae5ea2f1ca2e7a1978cfa54e9cbab4944324c243", optional = true }
 axum = { version = "0.7", features = ["json", "query"] }
 tower = { version = "0.5", features = ["limit", "util"] }
 tower-http = { version = "0.6", features = ["trace", "cors", "limit"] }
