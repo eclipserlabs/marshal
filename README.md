@@ -269,7 +269,7 @@ cargo test --lib
 cargo test --doc
 cargo test --test escapes
 cargo test --test server
-cargo test --test validation
+cargo test --features experiment --test validation
 cargo run --bin fuzz_destination
 cargo run --bin fuzz_destination -- 'https://example.com/'
 ```

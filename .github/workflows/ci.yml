@@ -39,8 +39,13 @@ jobs:
       # These went unrun for a release because the suite did not exist.
       - run: cargo test --test server
 
-      - run: cargo test --test validation
       - run: cargo test --test stress
+
+      # The validation harness sits behind a feature; build and test it here so
+      # gating it does not mean never compiling it again.
+      - run: cargo test --features experiment --test validation
+      - run: cargo clippy --features experiment --all-targets -- -D warnings
+        if: matrix.os == 'ubuntu-latest'
 
       - run: cargo run --example agent_tools
 
@@ -56,6 +61,7 @@ jobs:
       - uses: dtolnay/rust-toolchain@1.88
       - uses: Swatinem/rust-cache@v2
       - run: cargo check --all-targets
+      - run: cargo check --features experiment --all-targets
 
   docs:
     runs-on: ubuntu-latest
@@ -66,6 +72,9 @@ jobs:
       - run: cargo doc --no-deps
         env:
           RUSTDOCFLAGS: -D warnings
+      # The published crate must build from the packaged tarball, not just from
+      # the working tree.
+      - run: cargo package --allow-dirty --no-verify
 
   # Supply chain. This used to be `continue-on-error: true` inside the test
   # job, so an advisory against a dependency of a security tool produced a

@@ -47,6 +47,12 @@ pub mod code;
 pub mod destination;
 pub mod egress;
 pub mod error;
+/// The validation harness used to produce `validation/`.
+///
+/// Behind the `experiment` feature: it is a research artifact, and shipping it
+/// in the default API means committing to its shape at 1.0. Nothing in the
+/// library depends on it.
+#[cfg(feature = "experiment")]
 pub mod experiment;
 pub mod fs;
 pub mod http;
