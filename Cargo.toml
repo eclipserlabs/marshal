@@ -5,10 +5,19 @@ edition = "2021"
 rust-version = "1.88"
 license = "MIT"
 description = "Marshall — sandboxed tool execution for agents: filesystem, shell, HTTP, code, and system behind deny-by-default policies with SSRF protection."
-repository = "https://github.com/wiramahendra/marshall"
+repository = "https://github.com/rapture-fx/Marshall"
 readme = "README.md"
 keywords = ["agent", "sandbox", "ssrf", "tools", "security"]
 categories = ["development-tools", "web-programming"]
+# The validation harness is a research artifact, not part of the crate. Keeping
+# it out of the package keeps the published tarball to the library and service.
+exclude = [
+    "validation/",
+    "audit.jsonl",
+    "ROADMAP.md",
+    ".github/",
+    "fuzz/",
+]
 
 [lib]
 name = "marshall"

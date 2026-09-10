@@ -22,6 +22,7 @@ marshalld -- policy-checked tool execution over HTTP
 Usage: marshalld [--port 3000] [--bind 127.0.0.1] [--workspace /tmp/marshalld]
                  [--audit-log audit.jsonl] [--concurrency 32]
                  [--config marshall.yaml] [--validate-config <path>]
+                 [--healthcheck]
 
 Env:
   PORT, MARSHALLD_PORT        listen port (default 3000)
@@ -60,6 +61,8 @@ struct Args {
 /// Either run the server, or do something and exit.
 enum Action {
     Serve(Box<Args>),
+    /// Probe a running daemon and exit with its verdict.
+    Healthcheck(u16),
     Exit,
 }
 
@@ -96,6 +99,7 @@ fn parse_args() -> anyhow::Result<Action> {
                 println!("{policy:#?}");
                 return Ok(Action::Exit);
             }
+            "--healthcheck" => return Ok(Action::Healthcheck(port_from_env())),
             "--version" | "-V" => {
                 println!("marshalld {}", env!("CARGO_PKG_VERSION"));
                 return Ok(Action::Exit);
@@ -108,6 +112,24 @@ fn parse_args() -> anyhow::Result<Action> {
         }
     }
     Ok(Action::Serve(Box::new(parsed)))
+}
+
+/// Probe a locally running daemon's `/health`.
+///
+/// Exists so a container `HEALTHCHECK` can test the service rather than just
+/// proving the binary starts, without adding curl to the runtime image.
+async fn healthcheck(port: u16) -> anyhow::Result<()> {
+    let url = format!("http://127.0.0.1:{port}/health");
+    let response = reqwest::Client::new()
+        .get(&url)
+        .timeout(std::time::Duration::from_secs(3))
+        .send()
+        .await
+        .map_err(|e| anyhow::anyhow!("health probe failed: {e}"))?;
+    if !response.status().is_success() {
+        anyhow::bail!("health probe returned {}", response.status());
+    }
+    Ok(())
 }
 
 fn port_from_env() -> u16 {
@@ -124,6 +146,7 @@ async fn main() -> anyhow::Result<()> {
 
     let args = match parse_args()? {
         Action::Serve(args) => *args,
+        Action::Healthcheck(port) => return healthcheck(port).await,
         Action::Exit => return Ok(()),
     };
 
