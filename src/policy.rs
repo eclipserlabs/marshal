@@ -1,4 +1,3 @@
-#![allow(missing_docs)]
 //! Policy as Code — `marshall.yaml` (Phase 3)
 //!
 //! ```yaml
@@ -28,70 +27,114 @@ use serde::{Deserialize, Serialize};
 
 use crate::{shell::AllowedCommand, ArgumentPolicy, Sandbox};
 
+/// The whole of `marshall.yaml`.
+///
+/// Every allowlist inside is deny-by-default, and [`ExecutionPolicy::validate`]
+/// rejects a file rather than quietly correcting it — a policy that loads with
+/// a warning is a policy nobody reads.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ExecutionPolicy {
+    /// Sandbox root. Session workspaces are created beneath it.
     #[serde(default = "default_workspace")]
     pub workspace: PathBuf,
+    /// Global cap on in-flight executions.
     #[serde(default = "default_concurrency")]
     pub concurrency: usize,
+    /// JSONL audit log. Absent logs through `tracing` only.
     pub audit_log: Option<PathBuf>,
+    /// Filesystem tool policy.
     #[serde(default)]
     pub filesystem: FilesystemPolicy,
+    /// Shell tool policy.
     #[serde(default)]
     pub shell: ShellPolicy,
+    /// HTTP tool policy.
     #[serde(default)]
     pub http: HttpPolicy,
+    /// Code tool policy. Read [`CodePolicy`] before enabling it.
     #[serde(default)]
     pub code: CodePolicy,
+    /// System tool policy.
     #[serde(default)]
     pub system: SystemPolicy,
+    /// Per-client quota.
     #[serde(default)]
     pub rate_limit: RateLimitPolicy,
 }
 
+/// What the filesystem tool may do inside the workspace.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct FilesystemPolicy {
+    /// Whether mutating operations are permitted at all.
     #[serde(default = "default_true")]
     pub writable: bool,
+    /// Cap on a single read, in bytes. Reads past it report truncation.
     #[serde(default = "default_read_limit")]
     pub read_limit: usize,
 }
 
+/// Which binaries the shell tool may run, and with what arguments.
+///
+/// An empty [`ShellPolicy::commands`] means the tool is not registered. The
+/// argument policy is the effective control: most binaries accept options that
+/// reach the filesystem or the network.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ShellPolicy {
+    /// Permitted programs. Empty means the tool is not registered.
     #[serde(default)]
     pub commands: Vec<ShellCommandPolicy>,
+    /// Wall-clock limit per call.
     #[serde(default = "default_timeout")]
     pub timeout_ms: u64,
+    /// Cap on combined stdout and stderr, in bytes.
     #[serde(default = "default_output_limit")]
     pub output_limit: usize,
+    /// Environment variables to pass through. Absent clears the environment.
     pub allowed_env: Option<Vec<String>>,
 }
 
+/// One permitted program.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ShellCommandPolicy {
+    /// Absolute path to the binary. Relative paths are rejected at load time.
     pub program: String,
+    /// What arguments it may receive. Defaults to none.
     #[serde(default = "default_arg_policy")]
     pub args: ArgPolicySerde,
 }
 
+/// An [`ArgumentPolicy`] as written in YAML.
+///
+/// Two spellings, because both read naturally: `args: NoFlags` for the
+/// variants that carry no data, and a mapping for `Exact`.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(untagged)]
 pub enum ArgPolicySerde {
+    /// A bare variant name: `None`, `NoFlags`, or `Unrestricted`.
     Simple(String),
+    /// A mapping, which is how `Exact` carries its argument vectors.
     Detailed(ArgPolicyDetailed),
 }
 
+/// The mapping form of [`ArgPolicySerde`].
+///
+/// Fields are capitalised to match the variant names as they appear in YAML.
 #[allow(non_snake_case)]
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ArgPolicyDetailed {
+    /// Permitted argument vectors, matched in full.
     pub Exact: Option<Vec<Vec<String>>>,
+    /// Permit positionals but no `-`/`--` options.
     pub NoFlags: Option<bool>,
+    /// Permit anything. Read [`crate::shell::ShellTool`] first.
     pub Unrestricted: Option<bool>,
+    /// Permit no arguments.
     pub None: Option<bool>,
 }
 
 impl ArgPolicySerde {
+    /// Convert to the runtime policy. An unrecognised name falls back to
+    /// [`ArgumentPolicy::None`], the most restrictive option.
     pub fn into_policy(self) -> ArgumentPolicy {
         match self {
             ArgPolicySerde::Simple(s) => match s.as_str() {
@@ -116,14 +159,23 @@ impl ArgPolicySerde {
     }
 }
 
+/// Which hosts the HTTP tool may reach.
+///
+/// The allowlist is checked before DNS, and every resolved address still has to
+/// pass [`crate::destination`]. An allowlisted host that redirects or proxies
+/// extends trust to wherever it sends clients.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct HttpPolicy {
+    /// Permitted hostnames. Wildcards are rejected at load time.
     #[serde(default)]
     pub allowed_hosts: Vec<String>,
+    /// Cap on an outbound request body, in bytes.
     #[serde(default = "default_req_limit")]
     pub request_body_limit: usize,
+    /// Cap on a response body, in bytes.
     #[serde(default = "default_resp_limit")]
     pub response_body_limit: usize,
+    /// Wall-clock limit per request.
     #[serde(default = "default_timeout")]
     pub timeout_ms: u64,
 }
@@ -148,8 +200,10 @@ pub struct CodePolicy {
     /// Languages the tool will run. Empty means the tool is not registered.
     #[serde(default)]
     pub allowed_languages: Vec<String>,
+    /// Wall-clock limit per snippet.
     #[serde(default = "default_timeout")]
     pub timeout_ms: u64,
+    /// Cap on combined stdout and stderr, in bytes.
     #[serde(default = "default_output_limit")]
     pub output_limit: usize,
     /// Acknowledge that local-backend code execution has no OS isolation.
@@ -160,14 +214,20 @@ pub struct CodePolicy {
     pub allow_unsandboxed: bool,
 }
 
+/// What the system tool may report and do.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct SystemPolicy {
+    /// Environment variables readable through `env_get`/`env_list`. Values are
+    /// returned in `content`; only a digest reaches the summary.
     #[serde(default)]
     pub allowed_env: Vec<String>,
+    /// Permit `process_list`. Linux only; elsewhere it reports `not_supported`.
     #[serde(default)]
     pub allow_process_list: bool,
+    /// Permit `process_kill`. Not scoped to session children.
     #[serde(default)]
     pub allow_kill: bool,
+    /// Upper bound on `sleep`, itself bounded by a hard cap.
     #[serde(default = "default_max_sleep")]
     pub max_sleep_ms: u64,
 }
@@ -182,6 +242,7 @@ pub struct SystemPolicy {
 /// executes tools on request. Set `enabled: false` to turn it off.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct RateLimitPolicy {
+    /// Whether to enforce quotas at all.
     #[serde(default = "default_true")]
     pub enabled: bool,
     /// Sustained rate per client.
@@ -319,17 +380,21 @@ impl Default for SystemPolicy {
 }
 
 impl ExecutionPolicy {
+    /// Read and validate a policy file.
     pub fn from_file(path: &Path) -> anyhow::Result<Self> {
         let s = std::fs::read_to_string(path)?;
         Self::from_yaml(&s)
     }
 
+    /// Parse and validate YAML.
     pub fn from_yaml(s: &str) -> anyhow::Result<Self> {
         let p: Self = serde_yaml::from_str(s)?;
         p.validate()?;
         Ok(p)
     }
 
+    /// Reject a policy that is malformed, out of bounds, or dangerously
+    /// permissive in a way the operator has not acknowledged.
     pub fn validate(&self) -> anyhow::Result<()> {
         if self.concurrency == 0 {
             anyhow::bail!("concurrency must be >0");
@@ -427,11 +492,13 @@ impl ExecutionPolicy {
         Ok(())
     }
 
+    /// Create the workspace directory and a [`Sandbox`] rooted at it.
     pub fn sandbox(&self) -> anyhow::Result<Sandbox> {
         std::fs::create_dir_all(&self.workspace)?;
         Sandbox::new([&self.workspace]).map_err(|e| anyhow::anyhow!("{e}"))
     }
 
+    /// The shell allowlist as runtime values.
     pub fn allowed_commands(&self) -> Vec<AllowedCommand> {
         self.shell
             .commands
@@ -442,17 +509,21 @@ impl ExecutionPolicy {
             .collect()
     }
 
+    /// [`ShellPolicy::timeout_ms`] as a [`Duration`].
     pub fn shell_timeout(&self) -> Duration {
         Duration::from_millis(self.shell.timeout_ms)
     }
+    /// [`HttpPolicy::timeout_ms`] as a [`Duration`].
     pub fn http_timeout(&self) -> Duration {
         Duration::from_millis(self.http.timeout_ms)
     }
 
+    /// [`CodePolicy::timeout_ms`] as a [`Duration`].
     pub fn code_timeout(&self) -> Duration {
         Duration::from_millis(self.code.timeout_ms)
     }
 
+    /// The configured languages as runtime values.
     pub fn code_languages(&self) -> Vec<crate::Language> {
         self.code
             .allowed_languages
@@ -469,6 +540,7 @@ impl ExecutionPolicy {
         !self.code_languages().is_empty()
     }
 
+    /// Build a [`crate::SystemTool`] from [`ExecutionPolicy::system`].
     pub fn system_tool(&self) -> crate::SystemTool {
         crate::SystemTool::new()
             .with_allowed_env(self.system.allowed_env.clone())

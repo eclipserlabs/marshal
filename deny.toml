@@ -14,19 +14,18 @@ multiple-versions = "warn"
 wildcards = "deny"
 
 [licenses]
-# Permissive licenses only. Anything copyleft in the tree is a decision someone
-# should make deliberately, not discover at release time.
+# Exactly what is in the tree today, and nothing aspirational: a new license
+# showing up should be a decision someone makes, not a silent pass.
 allow = [
     "MIT",
     "Apache-2.0",
     "Apache-2.0 WITH LLVM-exception",
-    "BSD-2-Clause",
     "BSD-3-Clause",
     "ISC",
     "Unicode-3.0",
-    "Unicode-DFS-2016",
-    "Zlib",
-    "MPL-2.0",
+    # notify, the config file watcher. A public-domain dedication.
+    "CC0-1.0",
+    # webpki-roots, the trust anchors rustls verifies against.
     "CDLA-Permissive-2.0",
 ]
 confidence-threshold = 0.9
@@ -34,7 +33,8 @@ confidence-threshold = 0.9
 [sources]
 unknown-registry = "deny"
 unknown-git = "deny"
-# `watchdog` is an optional dependency behind the `container` feature, pinned to
-# a revision rather than a branch. It is not published, which is a release
-# blocker for shipping that feature to anyone else — tracked in ROADMAP.md.
-allow-git = ["https://github.com/wiramahendra/watchdog"]
+# `watchdog` is only in the graph with `--features container`, so this list is
+# empty for a default check. Add the repository here if that feature is ever
+# checked in CI — it is unpublished, which is itself a release blocker for
+# shipping the feature to anyone else (tracked in ROADMAP.md).
+allow-git = []
