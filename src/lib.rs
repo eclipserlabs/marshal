@@ -55,6 +55,7 @@ pub mod policy;
 pub mod redaction;
 pub mod registry;
 pub mod sandbox;
+pub mod server;
 pub mod shell;
 pub mod system;
 
@@ -81,6 +82,7 @@ pub use policy::ExecutionPolicy;
 pub use redaction::REDACTION_POLICY_VERSION;
 pub use registry::{ToolDefinition, ToolRegistry};
 pub use sandbox::{Sandbox, SandboxError};
+pub use server::ServerConfig;
 pub use shell::{ArgumentPolicy, ShellTool};
 pub use system::{SystemPolicy, SystemTool};
 
