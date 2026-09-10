@@ -34,8 +34,8 @@ use tokio_stream::wrappers::ReceiverStream;
 use tracing::{info, warn};
 
 use marshall::{
-    destination as dest, shell::AllowedCommand, ArgumentPolicy, EgressPolicy, ExecutionPolicy,
-    FileSystemTool, HttpTool, Limits, Sandbox, ShellTool, ToolOutcome, ToolRegistry,
+    destination as dest, EgressPolicy, ExecutionPolicy, FileSystemTool, HttpTool, Limits, Sandbox,
+    ShellTool, ToolOutcome, ToolRegistry,
 };
 
 // ---------------------------------------------------------------------------
@@ -77,6 +77,37 @@ fn auth_token_from_env() -> Option<String> {
         .ok()
         .map(|s| s.trim().to_string())
         .filter(|s| !s.is_empty())
+}
+
+/// The address to listen on.
+///
+/// Loopback by default. This used to be `0.0.0.0` unconditionally, so the
+/// out-of-the-box daemon — which also does not require a token — was reachable
+/// from the whole network, and a tool executor reachable without credentials is
+/// a remote shell.
+fn bind_addr(port: u16, bind_override: Option<&str>) -> anyhow::Result<SocketAddr> {
+    let host = match bind_override {
+        Some(h) => h.to_string(),
+        None => std::env::var("MARSHALLD_BIND").unwrap_or_else(|_| "127.0.0.1".into()),
+    };
+    let ip: std::net::IpAddr = host
+        .parse()
+        .map_err(|_| anyhow::anyhow!("invalid bind address: {host}"))?;
+    Ok(SocketAddr::new(ip, port))
+}
+
+/// Refuse to serve an unauthenticated executor on a non-loopback address.
+///
+/// A warning was not enough here: the failure mode is remote code execution,
+/// and the warning scrolls past in a container log nobody reads.
+fn check_bind_safety(addr: &SocketAddr, auth_token: &Option<String>) -> anyhow::Result<()> {
+    if auth_token.is_some() || addr.ip().is_loopback() {
+        return Ok(());
+    }
+    anyhow::bail!(
+        "refusing to bind {addr} without authentication: set MARSHALLD_API_TOKEN, \
+         or bind loopback (MARSHALLD_BIND=127.0.0.1) for local development"
+    )
 }
 
 /// 401 response when the bearer token is missing/wrong. `None` = authorized.
@@ -360,7 +391,11 @@ async fn metrics(State(state): State<AppState>) -> impl IntoResponse {
     )
 }
 
-#[tracing::instrument(skip(state))]
+// `headers` is skipped deliberately: `tracing::instrument` records every
+// un-skipped argument with `Debug`, and a `HeaderMap` Debug-prints
+// `Authorization: Bearer <token>` in full. Every request was writing the
+// caller's credential into the log at INFO.
+#[tracing::instrument(skip(state, headers))]
 async fn list_tools(
     State(state): State<AppState>,
     headers: axum::http::HeaderMap,
@@ -486,7 +521,8 @@ fn inject_session_id(requests: &mut [ExecuteRequest], top_sid: &Option<String>) 
     }
 }
 
-#[tracing::instrument(skip(state, req), fields(tool = %req.tool))]
+// `headers` skipped: see `list_tools`. It carries the bearer token.
+#[tracing::instrument(skip(state, req, headers), fields(tool = %req.tool))]
 async fn execute(
     State(state): State<AppState>,
     headers: axum::http::HeaderMap,
@@ -1137,32 +1173,22 @@ fn build_registry_from_policy(policy: &ExecutionPolicy) -> anyhow::Result<ToolRe
     fs = fs.with_read_limit(policy.filesystem.read_limit);
     registry.register(std::sync::Arc::new(fs));
 
-    // Shell — from policy or fallback to echo/cat demo
-    let mut commands = policy.allowed_commands();
+    // Shell — strictly from policy. An empty allowlist used to be topped up
+    // with `echo`/`cat` "for the demo", which meant a config that granted no
+    // commands silently granted two.
+    let commands = policy.allowed_commands();
     if commands.is_empty() {
-        let echo = if Path::new("/bin/echo").exists() {
-            "/bin/echo"
-        } else {
-            "/usr/bin/echo"
-        };
-        let cat = if Path::new("/bin/cat").exists() {
-            "/bin/cat"
-        } else {
-            "/usr/bin/cat"
-        };
-        commands = vec![
-            AllowedCommand::new(echo).with_arguments(ArgumentPolicy::NoFlags),
-            AllowedCommand::new(cat).with_arguments(ArgumentPolicy::NoFlags),
-        ];
+        info!("shell.commands is empty: shell tool not registered");
+    } else {
+        let mut shell = ShellTool::new(commands)
+            .with_working_dirs(sandbox.clone())
+            .with_timeout(policy.shell_timeout())
+            .with_output_limit(policy.shell.output_limit);
+        if let Some(env) = &policy.shell.allowed_env {
+            shell = shell.with_allowed_env(env.clone());
+        }
+        registry.register(std::sync::Arc::new(shell));
     }
-    let mut shell = ShellTool::new(commands)
-        .with_working_dirs(sandbox.clone())
-        .with_timeout(policy.shell_timeout())
-        .with_output_limit(policy.shell.output_limit);
-    if let Some(env) = &policy.shell.allowed_env {
-        shell = shell.with_allowed_env(env.clone());
-    }
-    registry.register(std::sync::Arc::new(shell));
 
     // HTTP + egress proxy (server-side allowlist)
     let egress = EgressPolicy::new(policy.http.allowed_hosts.clone());
@@ -1184,26 +1210,31 @@ fn build_registry_from_policy(policy: &ExecutionPolicy) -> anyhow::Result<ToolRe
         registry.register(std::sync::Arc::new(ReflectTool));
     }
 
-    // Code execution (python/javascript/bash) — like executor.sh code cells
-    {
+    // Code execution — registered only when the policy names languages *and*
+    // acknowledges that the local backend is unsandboxed (`ExecutionPolicy::
+    // validate` enforces the second half). An empty list used to mean
+    // `allow_all()`, so the deny-by-default config was the permissive one.
+    if policy.code_enabled() {
         use marshall::CodeTool;
-        let langs = policy.code_languages();
         let mut code_tool = CodeTool::new()
             .with_sandbox(sandbox.clone())
             .with_timeout(policy.code_timeout())
             .with_output_limit(policy.code.output_limit);
-        if langs.is_empty() {
-            code_tool = code_tool.allow_all();
-        } else {
-            for lang in langs {
-                code_tool = code_tool.allow_language(lang);
-            }
+        for lang in policy.code_languages() {
+            code_tool = code_tool.allow_language(lang);
         }
         // Inherit env allowlist if specified for shell
         if let Some(env) = &policy.shell.allowed_env {
             code_tool = code_tool.with_allowed_env(env.clone());
         }
+        warn!(
+            languages = ?policy.code.allowed_languages,
+            "code tool enabled on the local backend: snippets are not isolated \
+             and bypass filesystem and http policy"
+        );
         registry.register(std::sync::Arc::new(code_tool));
+    } else {
+        info!("code.allowed_languages is empty: code tool not registered");
     }
 
     // System facts + bounded process control (deny-by-default policy)
@@ -1243,6 +1274,7 @@ async fn main() -> anyhow::Result<()> {
     let mut audit_path: Option<PathBuf> = None;
     let mut concurrency: usize = 32;
     let mut config_path: Option<PathBuf> = None;
+    let mut bind: Option<String> = None;
     let mut policy = ExecutionPolicy::default();
 
     while let Some(arg) = args.next() {
@@ -1262,6 +1294,11 @@ async fn main() -> anyhow::Result<()> {
             "--audit-log" => {
                 if let Some(p) = args.next() {
                     audit_path = Some(PathBuf::from(p));
+                }
+            }
+            "--bind" => {
+                if let Some(b) = args.next() {
+                    bind = Some(b);
                 }
             }
             "--concurrency" => {
@@ -1286,7 +1323,18 @@ async fn main() -> anyhow::Result<()> {
             }
             "--help" | "-h" => {
                 println!(
-                    "marshalld -- hosted executor\n\nUsage: marshalld [--port 3000] [--workspace /tmp/work] [--audit-log audit.jsonl] [--concurrency 32] [--config marshall.yaml]\n\nEnv: PORT, MARSHALLD_ALLOWED_HOSTS (comma list), RUST_LOG, MARSHALLD_JSON_LOGS\n\nPolicy: --config marshall.yaml (hot-reloaded via notify), or --validate-config <path>"
+                    "marshalld -- hosted executor\n\n\
+Usage: marshalld [--port 3000] [--bind 127.0.0.1] [--workspace /tmp/work]\n\
+                 [--audit-log audit.jsonl] [--concurrency 32] [--config marshall.yaml]\n\n\
+Env:\n\
+  PORT, MARSHALLD_PORT      listen port (default 3000)\n\
+  MARSHALLD_BIND            listen address (default 127.0.0.1)\n\
+  MARSHALLD_API_TOKEN       bearer token for /v1/*; required for non-loopback binds\n\
+  MARSHALLD_CORS_ORIGIN     exact allowed origin; unset means same-origin only\n\
+  MARSHALLD_SESSION_TTL_SECS  session lifetime (default 3600)\n\
+  MARSHALLD_ALLOWED_HOSTS   comma-separated egress allowlist\n\
+  RUST_LOG, MARSHALLD_JSON_LOGS\n\n\
+Policy: --config marshall.yaml (hot-reloaded via notify), or --validate-config <path>"
                 );
                 return Ok(());
             }
@@ -1341,6 +1389,7 @@ async fn main() -> anyhow::Result<()> {
             policy.audit_log.or(audit_path),
             concurrency,
             port,
+            bind,
             config_path,
         )
         .await;
@@ -1369,14 +1418,16 @@ async fn main() -> anyhow::Result<()> {
         auth_token: auth_token_from_env(),
         session_ttl: session_ttl_from_env(),
     };
+    let addr = bind_addr(port, bind.as_deref())?;
+    check_bind_safety(&addr, &state.auth_token)?;
     if state.auth_token.is_none() {
-        warn!("MARSHALLD_API_TOKEN not set: /v1/* is unauthenticated (localhost only recommended)");
+        warn!("MARSHALLD_API_TOKEN not set: /v1/* is unauthenticated (loopback only)");
     }
     spawn_session_sweeper(state.clone());
 
-    let app = build_router(state);
+    let cors = build_cors()?;
+    let app = build_router_with_cors(state, cors);
 
-    let addr = SocketAddr::from(([0, 0, 0, 0], port));
     info!(%addr, "listening");
 
     let listener = tokio::net::TcpListener::bind(addr).await?;
@@ -1391,6 +1442,7 @@ async fn serve(
     audit_path: Option<PathBuf>,
     concurrency: usize,
     port: u16,
+    bind: Option<String>,
     config_path: Option<PathBuf>,
 ) -> anyhow::Result<()> {
     // Derive egress hosts from initial registry's policy was already via ExecutionPolicy; keep in sync
@@ -1420,8 +1472,10 @@ async fn serve(
         auth_token: auth_token_from_env(),
         session_ttl: session_ttl_from_env(),
     };
+    let addr = bind_addr(port, bind.as_deref())?;
+    check_bind_safety(&addr, &state.auth_token)?;
     if state.auth_token.is_none() {
-        warn!("MARSHALLD_API_TOKEN not set: /v1/* is unauthenticated (localhost only recommended)");
+        warn!("MARSHALLD_API_TOKEN not set: /v1/* is unauthenticated (loopback only)");
     }
     spawn_session_sweeper(state.clone());
 
@@ -1474,9 +1528,9 @@ async fn serve(
         });
     }
 
-    let app = build_router(state);
+    let cors = build_cors()?;
+    let app = build_router_with_cors(state, cors);
 
-    let addr = SocketAddr::from(([0, 0, 0, 0], port));
     info!(%addr, "listening (policy mode)");
 
     let listener = tokio::net::TcpListener::bind(addr).await?;
@@ -1484,30 +1538,44 @@ async fn serve(
     Ok(())
 }
 
-fn build_router(state: AppState) -> Router {
-    // CORS: `MARSHALLD_CORS_ORIGIN=https://app.example.com` restricts to one
-    // origin; unset keeps `AllowOrigin::any()` for local dev (logged).
-    let cors = {
-        let mut layer = tower_http::cors::CorsLayer::new().allow_methods([
-            axum::http::Method::GET,
-            axum::http::Method::POST,
-            axum::http::Method::DELETE,
-        ]);
-        layer = layer.allow_headers([
-            axum::http::header::CONTENT_TYPE,
-            axum::http::header::AUTHORIZATION,
-        ]);
-        if let Ok(origin) = std::env::var("MARSHALLD_CORS_ORIGIN") {
-            if let Ok(val) = origin.parse::<axum::http::HeaderValue>() {
-                layer.allow_origin(tower_http::cors::AllowOrigin::exact(val))
-            } else {
-                layer.allow_origin(tower_http::cors::AllowOrigin::any())
-            }
-        } else {
-            layer.allow_origin(tower_http::cors::AllowOrigin::any())
-        }
+/// Build the CORS layer, if any.
+///
+/// Unset means *no* CORS layer: same-origin only. This used to default to
+/// `AllowOrigin::any()`, which let any web page in the user's browser drive
+/// the executor — and since the browser attaches no bearer token, an
+/// unauthenticated daemon on localhost was reachable from any tab.
+///
+/// An invalid `MARSHALLD_CORS_ORIGIN` is a hard error rather than a silent
+/// downgrade to `any()`, which is what it used to do.
+fn build_cors() -> anyhow::Result<Option<tower_http::cors::CorsLayer>> {
+    let origin = match std::env::var("MARSHALLD_CORS_ORIGIN") {
+        Ok(o) if !o.trim().is_empty() => o,
+        _ => return Ok(None),
     };
-    Router::new()
+    let value = origin
+        .parse::<axum::http::HeaderValue>()
+        .map_err(|_| anyhow::anyhow!("MARSHALLD_CORS_ORIGIN is not a valid origin: {origin}"))?;
+    Ok(Some(
+        tower_http::cors::CorsLayer::new()
+            .allow_methods([
+                axum::http::Method::GET,
+                axum::http::Method::POST,
+                axum::http::Method::DELETE,
+            ])
+            .allow_headers([
+                axum::http::header::CONTENT_TYPE,
+                axum::http::header::AUTHORIZATION,
+            ])
+            .allow_origin(tower_http::cors::AllowOrigin::exact(value)),
+    ))
+}
+
+fn build_router(state: AppState) -> Router {
+    build_router_with_cors(state, build_cors().unwrap_or(None))
+}
+
+fn build_router_with_cors(state: AppState, cors: Option<tower_http::cors::CorsLayer>) -> Router {
+    let router = Router::new()
         .route("/health", get(health))
         .route("/metrics", get(metrics))
         .route("/v1/tools", get(list_tools))
@@ -1519,8 +1587,11 @@ fn build_router(state: AppState) -> Router {
         .route("/v1/execute/stream", post(execute_stream))
         .route("/v1/policy", get(get_policy))
         .with_state(state)
-        .layer(tower_http::trace::TraceLayer::new_for_http())
-        .layer(cors)
+        .layer(tower_http::trace::TraceLayer::new_for_http());
+    match cors {
+        Some(layer) => router.layer(layer),
+        None => router,
+    }
 }
 
 async fn get_policy(

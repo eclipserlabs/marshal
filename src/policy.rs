@@ -126,14 +126,36 @@ pub struct HttpPolicy {
     pub timeout_ms: u64,
 }
 
+/// Policy for the `code` tool.
+///
+/// # Why this one has an extra gate
+///
+/// `shell` is an allowlist of *binaries*: the policy names what may run.
+/// `code` accepts arbitrary source in an allowed language, so on the local
+/// backend it is equivalent to `shell` with `ArgumentPolicy::Unrestricted` on
+/// an interpreter — a snippet reads any file the daemon can read and reaches
+/// any host the daemon can reach, bypassing `filesystem` and `http` policy
+/// entirely.
+///
+/// So enabling a language is not enough. [`CodePolicy::allow_unsandboxed`]
+/// must also be set, which is the operator saying in the config file that they
+/// know the other policies do not apply here. Isolating backends (`wasm`,
+/// `container`) do not need it.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct CodePolicy {
+    /// Languages the tool will run. Empty means the tool is not registered.
     #[serde(default)]
     pub allowed_languages: Vec<String>,
     #[serde(default = "default_timeout")]
     pub timeout_ms: u64,
     #[serde(default = "default_output_limit")]
     pub output_limit: usize,
+    /// Acknowledge that local-backend code execution has no OS isolation.
+    ///
+    /// Required to enable [`CodePolicy::allowed_languages`] on the local
+    /// backend; without it, a config that lists languages fails to load.
+    #[serde(default)]
+    pub allow_unsandboxed: bool,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -225,9 +247,14 @@ impl Default for HttpPolicy {
 impl Default for CodePolicy {
     fn default() -> Self {
         Self {
-            allowed_languages: vec!["python".into(), "bash".into(), "javascript".into()],
+            // Deny by default, like every other allowlist in this crate. The
+            // previous default enabled python/bash/javascript, which made an
+            // unconfigured daemon strictly more permissive than a configured
+            // one.
+            allowed_languages: Vec::new(),
             timeout_ms: default_timeout(),
             output_limit: default_output_limit(),
+            allow_unsandboxed: false,
         }
     }
 }
@@ -315,6 +342,17 @@ impl ExecutionPolicy {
                 anyhow::bail!("unsupported code language: {lang}");
             }
         }
+        // Fail closed: listing languages enables arbitrary source execution on
+        // the local backend, which bypasses `filesystem` and `http` policy. The
+        // operator has to say so explicitly.
+        if !self.code.allowed_languages.is_empty() && !self.code.allow_unsandboxed {
+            anyhow::bail!(
+                "code.allowed_languages is set but code.allow_unsandboxed is false: \
+                 local-backend code execution has no OS isolation and bypasses \
+                 filesystem and http policy. Set code.allow_unsandboxed: true to \
+                 accept this, or remove code.allowed_languages to disable the tool."
+            );
+        }
         if self.system.max_sleep_ms == 0
             || self.system.max_sleep_ms > crate::system::MAX_SLEEP_MS_HARD_CAP
         {
@@ -366,6 +404,14 @@ impl ExecutionPolicy {
             .iter()
             .filter_map(|s| crate::Language::parse(s))
             .collect()
+    }
+
+    /// Whether the `code` tool should be registered at all.
+    ///
+    /// An empty language list means "no code execution", not "all languages".
+    /// The registry builder used to read it the other way round.
+    pub fn code_enabled(&self) -> bool {
+        !self.code_languages().is_empty()
     }
 
     pub fn system_tool(&self) -> crate::SystemTool {
@@ -447,6 +493,36 @@ system:
         assert!(p.system.allow_process_list);
         let tool = p.system_tool();
         assert!(tool.parameters_schema().get("properties").is_some());
+    }
+
+    #[test]
+    fn code_is_denied_by_default() {
+        // The default used to enable python/bash/javascript, making an
+        // unconfigured daemon more permissive than a configured one.
+        let p = ExecutionPolicy::default();
+        assert!(p.code.allowed_languages.is_empty());
+        assert!(!p.code_enabled());
+        assert!(!p.code.allow_unsandboxed);
+    }
+
+    #[test]
+    fn an_empty_language_list_means_no_languages() {
+        // Not "all languages" — which is how the registry builder read it.
+        let p = ExecutionPolicy::from_yaml("code: { allowed_languages: [] }").unwrap();
+        assert!(p.code_languages().is_empty());
+        assert!(!p.code_enabled());
+    }
+
+    #[test]
+    fn enabling_a_language_requires_acknowledging_it_is_unsandboxed() {
+        let yaml = r#"code: { allowed_languages: [python] }"#;
+        let err = ExecutionPolicy::from_yaml(yaml).unwrap_err().to_string();
+        assert!(err.contains("allow_unsandboxed"), "{err}");
+
+        let yaml = r#"code: { allowed_languages: [python], allow_unsandboxed: true }"#;
+        let p = ExecutionPolicy::from_yaml(yaml).unwrap();
+        assert!(p.code_enabled());
+        assert_eq!(p.code_languages().len(), 1);
     }
 
     #[test]
