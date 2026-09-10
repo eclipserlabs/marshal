@@ -54,6 +54,14 @@ code:
   timeout_ms: 10000
   output_limit: 1048576
 
+# Per-client quota. `concurrency` above caps total in-flight work, which
+# protects the host; this stops one caller consuming everyone else's share.
+# Clients are told apart by bearer token, or by peer address when there is none.
+rate_limit:
+  enabled: true
+  per_minute: 600   # 10/s sustained
+  burst: 60
+
 system:
   allowed_env: [PATH, TZ]
   allow_process_list: false

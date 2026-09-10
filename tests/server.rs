@@ -723,6 +723,108 @@ async fn requests_over_the_concurrency_cap_are_shed() {
     assert_eq!(body["code"], "concurrency_limited");
 }
 
+// ── quotas ──────────────────────────────────────────────────
+
+#[tokio::test]
+async fn a_client_over_its_quota_gets_429_with_retry_after() {
+    let ws = Workspace::new("quota");
+    let app = ws.app_with(ServerConfig {
+        rate_limit: Some(marshall::RateLimit::new(60, 2)),
+        ..ws.config()
+    });
+
+    for i in 0..2 {
+        let (status, _) = send(&app, get("/v1/tools")).await;
+        assert_eq!(status, StatusCode::OK, "burst request {i}");
+    }
+
+    let response = app.clone().oneshot(get("/v1/tools")).await.unwrap();
+    assert_eq!(response.status(), StatusCode::TOO_MANY_REQUESTS);
+    let retry_after: u64 = response
+        .headers()
+        .get("retry-after")
+        .expect("retry-after header")
+        .to_str()
+        .unwrap()
+        .parse()
+        .expect("retry-after is a number of seconds");
+    assert!(retry_after >= 1, "retry-after invites an instant retry");
+}
+
+#[tokio::test]
+async fn quotas_are_per_token_so_one_client_cannot_starve_another() {
+    // The global semaphore could not do this: it sheds whoever arrives when
+    // the pool is full, regardless of who filled it.
+    let ws = Workspace::new("quota_isolation");
+    let app = ws.app_with(ServerConfig {
+        auth_token: None,
+        rate_limit: Some(marshall::RateLimit::new(60, 2)),
+        ..ws.config()
+    });
+
+    for _ in 0..2 {
+        let (status, _) = send(&app, with_token(get("/v1/tools"), "noisy")).await;
+        assert_eq!(status, StatusCode::OK);
+    }
+    let (status, body) = send(&app, with_token(get("/v1/tools"), "noisy")).await;
+    assert_eq!(status, StatusCode::TOO_MANY_REQUESTS);
+    assert_eq!(body["code"], "rate_limited");
+
+    // A different token has its own bucket and is unaffected.
+    let (status, _) = send(&app, with_token(get("/v1/tools"), "quiet")).await;
+    assert_eq!(status, StatusCode::OK);
+}
+
+#[tokio::test]
+async fn no_quota_configured_means_no_throttling() {
+    let ws = Workspace::new("quota_off");
+    let app = ws.app();
+    for i in 0..50 {
+        let (status, _) = send(&app, get("/v1/tools")).await;
+        assert_eq!(status, StatusCode::OK, "request {i}");
+    }
+}
+
+#[tokio::test]
+async fn the_quota_runs_after_auth_so_it_cannot_be_used_to_probe_tokens() {
+    // If throttling came first, an unauthenticated attacker could exhaust a
+    // victim's bucket, and 429-vs-401 would distinguish valid tokens.
+    let ws = Workspace::new("quota_after_auth");
+    let app = ws.app_with(ServerConfig {
+        auth_token: Some("secret".into()),
+        rate_limit: Some(marshall::RateLimit::new(60, 1)),
+        ..ws.config()
+    });
+
+    for _ in 0..5 {
+        let (status, _) = send(&app, with_token(get("/v1/tools"), "wrong")).await;
+        assert_eq!(
+            status,
+            StatusCode::UNAUTHORIZED,
+            "a bad token produced something other than 401"
+        );
+    }
+
+    // The real client's allowance was not spent by those attempts.
+    let (status, _) = send(&app, with_token(get("/v1/tools"), "secret")).await;
+    assert_eq!(status, StatusCode::OK);
+}
+
+#[tokio::test]
+async fn health_and_metrics_are_not_throttled() {
+    // A liveness probe that gets 429 takes the instance out of rotation.
+    let ws = Workspace::new("quota_probes");
+    let app = ws.app_with(ServerConfig {
+        rate_limit: Some(marshall::RateLimit::new(60, 1)),
+        ..ws.config()
+    });
+
+    for uri in ["/health", "/metrics", "/health", "/metrics"] {
+        let (status, _) = send_text(&app, get(uri)).await;
+        assert_eq!(status, StatusCode::OK, "{uri} was throttled");
+    }
+}
+
 // ── idempotency ─────────────────────────────────────────────
 
 #[tokio::test]

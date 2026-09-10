@@ -45,6 +45,8 @@ pub struct ExecutionPolicy {
     pub code: CodePolicy,
     #[serde(default)]
     pub system: SystemPolicy,
+    #[serde(default)]
+    pub rate_limit: RateLimitPolicy,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -170,6 +172,44 @@ pub struct SystemPolicy {
     pub max_sleep_ms: u64,
 }
 
+/// Per-client request quota.
+///
+/// The global `concurrency` cap sheds load to protect the host; it does nothing
+/// to stop one caller consuming the whole allowance. This is per client — the
+/// bearer token when there is one, the peer address otherwise.
+///
+/// On by default: "no quota" is not a sensible default for a service that
+/// executes tools on request. Set `enabled: false` to turn it off.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct RateLimitPolicy {
+    #[serde(default = "default_true")]
+    pub enabled: bool,
+    /// Sustained rate per client.
+    #[serde(default = "default_rate_per_minute")]
+    pub per_minute: u32,
+    /// How many requests may arrive at once before the sustained rate applies.
+    #[serde(default = "default_rate_burst")]
+    pub burst: u32,
+}
+
+impl Default for RateLimitPolicy {
+    fn default() -> Self {
+        Self {
+            enabled: true,
+            per_minute: default_rate_per_minute(),
+            burst: default_rate_burst(),
+        }
+    }
+}
+
+impl RateLimitPolicy {
+    /// The limit to enforce, or `None` when disabled.
+    pub fn limit(&self) -> Option<crate::RateLimit> {
+        self.enabled
+            .then(|| crate::RateLimit::new(self.per_minute, self.burst))
+    }
+}
+
 // defaults
 fn default_workspace() -> PathBuf {
     PathBuf::from("/tmp/marshalld")
@@ -201,6 +241,14 @@ fn default_arg_policy() -> ArgPolicySerde {
 fn default_max_sleep() -> u64 {
     5_000
 }
+/// 10 requests per second sustained: comfortably above what an agent loop
+/// needs, comfortably below what a retry storm produces.
+fn default_rate_per_minute() -> u32 {
+    600
+}
+fn default_rate_burst() -> u32 {
+    60
+}
 
 impl Default for ExecutionPolicy {
     fn default() -> Self {
@@ -213,6 +261,7 @@ impl Default for ExecutionPolicy {
             http: HttpPolicy::default(),
             code: CodePolicy::default(),
             system: SystemPolicy::default(),
+            rate_limit: RateLimitPolicy::default(),
         }
     }
 }
@@ -352,6 +401,12 @@ impl ExecutionPolicy {
                  filesystem and http policy. Set code.allow_unsandboxed: true to \
                  accept this, or remove code.allowed_languages to disable the tool."
             );
+        }
+        if self.rate_limit.enabled && self.rate_limit.burst == 0 {
+            anyhow::bail!("rate_limit.burst must be >0 when rate limiting is enabled");
+        }
+        if self.rate_limit.per_minute > 1_000_000 {
+            anyhow::bail!("rate_limit.per_minute is implausibly large");
         }
         if self.system.max_sleep_ms == 0
             || self.system.max_sleep_ms > crate::system::MAX_SLEEP_MS_HARD_CAP

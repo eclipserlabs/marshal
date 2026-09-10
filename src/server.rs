@@ -36,6 +36,7 @@ use tokio::sync::{Mutex, Semaphore};
 use tokio_stream::wrappers::ReceiverStream;
 use tracing::{info, warn};
 
+use crate::ratelimit::{RateLimit, RateLimiter};
 use crate::{
     destination as dest, EgressPolicy, ExecutionPolicy, FileSystemTool, HttpTool, Sandbox,
     ShellTool, ToolOutcome, ToolRegistry,
@@ -68,6 +69,8 @@ pub struct AppState {
     auth_token: Option<String>,
     /// Session TTL (`MARSHALLD_SESSION_TTL_SECS`, default 3600s).
     session_ttl: Duration,
+    /// Per-client quota. `None` disables throttling.
+    rate_limiter: Option<Arc<RateLimiter>>,
 }
 
 /// Default session TTL: 1h.
@@ -149,6 +152,56 @@ fn check_auth(headers: &axum::http::HeaderMap, state: &AppState) -> Option<Respo
             )
                 .into_response(),
         )
+    }
+}
+
+/// Identify the caller for quota purposes.
+///
+/// The bearer token when there is one, digested — bucket keys land in maps that
+/// get logged and dumped, and a raw token there is a credential in a crash
+/// report. Otherwise the peer address, so an unauthenticated deployment still
+/// gets per-source limits. Callers with neither share one bucket, which is the
+/// conservative reading of "we cannot tell these apart".
+fn client_key(headers: &axum::http::HeaderMap, peer: Option<SocketAddr>) -> String {
+    if let Some(token) = headers
+        .get(axum::http::header::AUTHORIZATION)
+        .and_then(|v| v.to_str().ok())
+        .and_then(|v| v.strip_prefix("Bearer "))
+    {
+        // 16 hex chars is plenty to separate clients and useless for recovering
+        // the token.
+        return format!("t:{}", &crate::sha256_hex(token.as_bytes())[..16]);
+    }
+    match peer {
+        Some(addr) => format!("ip:{}", addr.ip()),
+        None => "anonymous".to_string(),
+    }
+}
+
+/// 429 response when the caller is over quota. `None` = within quota.
+fn check_rate_limit(
+    headers: &axum::http::HeaderMap,
+    peer: Option<SocketAddr>,
+    state: &AppState,
+) -> Option<Response> {
+    let limiter = state.rate_limiter.as_ref()?;
+    let key = client_key(headers, peer);
+    match limiter.check(&key) {
+        Ok(()) => None,
+        Err(throttled) => {
+            warn!(client = %key, "rate limited");
+            Some(
+                (
+                    StatusCode::TOO_MANY_REQUESTS,
+                    [("retry-after", throttled.retry_after_secs.to_string())],
+                    Json(ErrorResponse {
+                        error: "rate limit exceeded".into(),
+                        code: "rate_limited".into(),
+                    }),
+                )
+                    .into_response(),
+            )
+        }
     }
 }
 
@@ -405,9 +458,13 @@ async fn metrics(State(state): State<AppState>) -> impl IntoResponse {
 #[tracing::instrument(skip(state, headers))]
 async fn list_tools(
     State(state): State<AppState>,
+    peer: Option<axum::extract::ConnectInfo<SocketAddr>>,
     headers: axum::http::HeaderMap,
 ) -> impl IntoResponse {
     if let Some(resp) = check_auth(&headers, &state) {
+        return resp;
+    }
+    if let Some(resp) = check_rate_limit(&headers, peer.map(|p| p.0), &state) {
         return resp;
     }
     let registry = state.registry.read().await.clone();
@@ -416,10 +473,14 @@ async fn list_tools(
 
 async fn create_session(
     State(state): State<AppState>,
+    peer: Option<axum::extract::ConnectInfo<SocketAddr>>,
     headers: axum::http::HeaderMap,
     Json(_req): Json<CreateSessionRequest>,
 ) -> impl IntoResponse {
     if let Some(resp) = check_auth(&headers, &state) {
+        return resp;
+    }
+    if let Some(resp) = check_rate_limit(&headers, peer.map(|p| p.0), &state) {
         return resp;
     }
     let id = uuid::Uuid::new_v4().to_string();
@@ -532,10 +593,14 @@ fn inject_session_id(requests: &mut [ExecuteRequest], top_sid: &Option<String>) 
 #[tracing::instrument(skip(state, req, headers), fields(tool = %req.tool))]
 async fn execute(
     State(state): State<AppState>,
+    peer: Option<axum::extract::ConnectInfo<SocketAddr>>,
     headers: axum::http::HeaderMap,
     Json(req): Json<ExecuteRequest>,
 ) -> Response {
     if let Some(resp) = check_auth(&headers, &state) {
+        return resp;
+    }
+    if let Some(resp) = check_rate_limit(&headers, peer.map(|p| p.0), &state) {
         return resp;
     }
     state.metrics.inc_request();
@@ -674,10 +739,14 @@ async fn execute(
 
 async fn execute_batch(
     State(state): State<AppState>,
+    peer: Option<axum::extract::ConnectInfo<SocketAddr>>,
     headers: axum::http::HeaderMap,
     Json(mut req): Json<BatchRequest>,
 ) -> Response {
     if let Some(resp) = check_auth(&headers, &state) {
+        return resp;
+    }
+    if let Some(resp) = check_rate_limit(&headers, peer.map(|p| p.0), &state) {
         return resp;
     }
     purge_expired_sessions(&state).await;
@@ -855,10 +924,14 @@ async fn execute_batch(
 
 async fn execute_sequence(
     State(state): State<AppState>,
+    peer: Option<axum::extract::ConnectInfo<SocketAddr>>,
     headers: axum::http::HeaderMap,
     Json(mut req): Json<SequenceRequest>,
 ) -> Response {
     if let Some(resp) = check_auth(&headers, &state) {
+        return resp;
+    }
+    if let Some(resp) = check_rate_limit(&headers, peer.map(|p| p.0), &state) {
         return resp;
     }
     purge_expired_sessions(&state).await;
@@ -1008,10 +1081,14 @@ async fn execute_sequence(
 /// Non-shell tools emit `summary` then `done` so SDKs can always parse SSE.
 async fn execute_stream(
     State(state): State<AppState>,
+    peer: Option<axum::extract::ConnectInfo<SocketAddr>>,
     headers: axum::http::HeaderMap,
     Json(req): Json<ExecuteRequest>,
 ) -> Response {
     if let Some(resp) = check_auth(&headers, &state) {
+        return resp;
+    }
+    if let Some(resp) = check_rate_limit(&headers, peer.map(|p| p.0), &state) {
         return resp;
     }
     let _permit = match state.semaphore.clone().try_acquire_owned() {
@@ -1085,10 +1162,14 @@ async fn execute_stream(
 
 async fn delete_session(
     State(state): State<AppState>,
+    peer: Option<axum::extract::ConnectInfo<SocketAddr>>,
     headers: axum::http::HeaderMap,
     AxumPath(id): AxumPath<String>,
 ) -> impl IntoResponse {
     if let Some(resp) = check_auth(&headers, &state) {
+        return resp;
+    }
+    if let Some(resp) = check_rate_limit(&headers, peer.map(|p| p.0), &state) {
         return resp;
     }
     let mut sessions = state.sessions.lock().await;
@@ -1282,6 +1363,9 @@ pub struct ServerConfig {
     pub auth_token: Option<String>,
     /// Session lifetime. `None` reads `MARSHALLD_SESSION_TTL_SECS`.
     pub session_ttl: Option<Duration>,
+    /// Per-client quota. `None` disables throttling, leaving only the global
+    /// concurrency cap — which protects the host but not the other callers.
+    pub rate_limit: Option<RateLimit>,
 }
 
 impl ServerConfig {
@@ -1297,6 +1381,7 @@ impl ServerConfig {
             egress_hosts: Vec::new(),
             auth_token: None,
             session_ttl: None,
+            rate_limit: None,
         }
     }
 }
@@ -1318,6 +1403,9 @@ pub fn build_state(registry: Arc<ToolRegistry>, config: &ServerConfig) -> AppSta
         egress_hosts: Arc::new(Mutex::new(config.egress_hosts.clone())),
         auth_token: config.auth_token.clone().or_else(auth_token_from_env),
         session_ttl: config.session_ttl.unwrap_or_else(session_ttl_from_env),
+        rate_limiter: config
+            .rate_limit
+            .map(|limit| Arc::new(RateLimiter::new(limit))),
     }
 }
 
@@ -1397,7 +1485,14 @@ pub async fn serve(registry: Arc<ToolRegistry>, config: ServerConfig) -> anyhow:
     info!(%addr, "listening");
 
     let listener = tokio::net::TcpListener::bind(addr).await?;
-    axum::serve(listener, app).await?;
+    // `into_make_service_with_connect_info` is what makes the peer address
+    // available to handlers; without it every unauthenticated caller shares one
+    // rate-limit bucket.
+    axum::serve(
+        listener,
+        app.into_make_service_with_connect_info::<SocketAddr>(),
+    )
+    .await?;
     Ok(())
 }
 
@@ -1465,9 +1560,13 @@ pub fn build_router_with_cors(
 
 async fn get_policy(
     State(state): State<AppState>,
+    peer: Option<axum::extract::ConnectInfo<SocketAddr>>,
     headers: axum::http::HeaderMap,
 ) -> impl IntoResponse {
     if let Some(resp) = check_auth(&headers, &state) {
+        return resp;
+    }
+    if let Some(resp) = check_rate_limit(&headers, peer.map(|p| p.0), &state) {
         return resp;
     }
     // Return current marshall.yaml if present, else defaults.

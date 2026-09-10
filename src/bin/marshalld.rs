@@ -177,6 +177,7 @@ async fn main() -> anyhow::Result<()> {
         egress_hosts: policy.http.allowed_hosts.clone(),
         auth_token: None,
         session_ttl: None,
+        rate_limit: policy.rate_limit.limit(),
     };
 
     server::serve(registry, config).await
