@@ -20,9 +20,9 @@
 //!
 //! Keys come from callers, so the bucket map is attacker-growable — the same
 //! unbounded-cache shape that was fixed in [`crate::registry`]. Buckets idle
-//! longer than [`IDLE_EVICTION`] are dropped, and past [`MAX_BUCKETS`] the
-//! oldest are evicted regardless. Eviction is safe: a missing bucket is
-//! recreated full, which is the same as never having been rate limited.
+//! for ten minutes are dropped, and past ten thousand clients the oldest are
+//! evicted regardless. Eviction is safe: a missing bucket is recreated full,
+//! which is the same as never having been rate limited.
 
 use std::collections::HashMap;
 use std::sync::Mutex;

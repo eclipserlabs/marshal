@@ -4,7 +4,7 @@
 //! language get the same policy checks the library applies in-process. The
 //! binary in `src/bin/marshalld.rs` is a CLI wrapper over [`serve`]; the module
 //! lives in the library so the endpoints can be tested without a socket
-//! (see `tests/server.rs`, which drives [`router`] through `tower`).
+//! (see `tests/server.rs`, which drives [`build_router`] through `tower`).
 //!
 //! ```sh
 //! marshalld --config marshall.yaml --port 3000
